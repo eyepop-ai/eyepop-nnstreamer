@@ -53,6 +53,14 @@
 #endif
 
 /** control delegate headers */
+#ifdef TFLITE_COREML_DELEGATE_SUPPORTED
+#if USE_TENSORFLOW2_HEADER_PATH
+#include <tensorflow2/lite/delegates/coreml/coreml_delegate.h>
+#else
+#include <tensorflow/lite/delegates/coreml/coreml_delegate.h>
+#endif
+#endif
+
 #ifdef TFLITE_XNNPACK_DELEGATE_SUPPORTED
 #if USE_TENSORFLOW2_HEADER_PATH
 #include <tensorflow2/lite/delegates/xnnpack/xnnpack_delegate.h>
@@ -112,6 +120,7 @@ typedef enum {
   TFLITE_DELEGATE_GPU,
   TFLITE_DELEGATE_NNAPI,
   TFLITE_DELEGATE_XNNPACK,
+  TFLITE_DELEGATE_COREML,
   TFLITE_DELEGATE_EXTERNAL,
 
   TFLITE_DELEGATE_MAX
@@ -446,6 +455,28 @@ TFLiteInterpreter::loadModel (int num_threads, tflite_delegate_e delegate_e)
 
   /** set delegate after the accelerator prop */
   switch (delegate_e) {
+    case TFLITE_DELEGATE_COREML:
+      {
+#if TFLITE_COREML_DELEGATE_SUPPORTED
+        /* set coreml delegate */
+        TfLiteCoreMlDelegateOptions coreml_options = {
+          .enabled_devices = TfLiteCoreMlDelegateAllDevices,
+          .coreml_version = 3,
+          .max_delegated_partitions = 0,
+          .min_nodes_per_partition = 2
+        };
+
+        delegate = TfLiteCoreMlDelegateCreate(&coreml_options);
+        void (*deleter) (TfLiteDelegate *) = [] (TfLiteDelegate *delegate_) {
+          TfLiteCoreMlDelegateDelete (delegate_);
+        };
+
+        setDelegate (delegate, deleter);
+#else
+        ml_logw ("NNStreamer was built without ColeML delegate. Given delegate option CoreML is ignored.");
+#endif
+        break;
+      }
     case TFLITE_DELEGATE_XNNPACK:
       {
 #if TFLITE_XNNPACK_DELEGATE_SUPPORTED
@@ -1293,6 +1324,8 @@ tflite_parseCustomOption (const GstTensorFilterProperties *prop, tflite_option_s
             option->delegate = TFLITE_DELEGATE_GPU;
           else if (g_ascii_strcasecmp (pair[1], "XNNPACK") == 0)
             option->delegate = TFLITE_DELEGATE_XNNPACK;
+          else if (g_ascii_strcasecmp (pair[1], "CoreML") == 0)
+            option->delegate = TFLITE_DELEGATE_COREML;
           else if (g_ascii_strcasecmp (pair[1], "External") == 0)
             option->delegate = TFLITE_DELEGATE_EXTERNAL;
           else

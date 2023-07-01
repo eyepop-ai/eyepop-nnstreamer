@@ -208,6 +208,24 @@ if tflite2_support_is_available
     tflite2_compile_args += '-DTFLITE_XNNPACK_DELEGATE_SUPPORTED'
   endif
 
+  ## coreml delegate
+  if cxx.links('''
+        #include "tensorflow/lite/delegates/coreml/coreml_delegate.h"
+        int main() {
+            TfLiteCoreMlDelegateOptions coreml_options = {
+              .enabled_devices = TfLiteCoreMlDelegateAllDevices,
+              .coreml_version = 3,
+              .max_delegated_partitions = 0,
+              .min_nodes_per_partition = 2
+            };
+            TfLiteDelegate *delegate = TfLiteCoreMlDelegateCreate(&coreml_options);
+            TfLiteCoreMlDelegateDelete (delegate);
+            return 0;
+        }
+      ''', dependencies : [tflite2_support_deps, thread_dep], name : 'coreml delegate')
+    tflite2_compile_args += '-DTFLITE_COREML_DELEGATE_SUPPORTED'
+  endif
+
   ## gpu delegate
   if cxx.links('''
         #include "tensorflow/lite/delegates/gpu/delegate.h"
