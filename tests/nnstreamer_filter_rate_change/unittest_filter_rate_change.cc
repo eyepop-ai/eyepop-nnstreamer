@@ -251,13 +251,40 @@ TEST_F (NNSFilterRateChangeTest, static_throttle) {
 }
 
 /**
- * @brief Test tensor_filter with passthrough framerate filter
+ * @brief Test tensor_filter decreasing framerate mid stream
  */
 TEST_F (NNSFilterRateChangeTest, throttling_dynamic_change_dec) {
   guint64 in, out, dup, drop;
 
   this->target_framerate_1 = DEFAULT_SOURCE_FRAMERATE;
   this->target_framerate_2 = "15/1";
+
+  this->runPipeline();
+
+  g_object_get(rate, "in", &in, NULL);
+  g_object_get(rate, "out", &out, NULL);
+  g_object_get(rate, "duplicate", &dup, NULL);
+  g_object_get(rate, "drop", &drop, NULL);
+
+  /** we don't expect the exact values */
+  EXPECT_EQ (in, source_num_buffers);
+  // ignore possible rounding error
+  EXPECT_GE (out, source_num_buffers / 2 + source_num_buffers / 4 - 1);
+  EXPECT_LE (out, source_num_buffers / 2 + source_num_buffers / 4 + 1);
+
+  EXPECT_EQ (out, this->num_samples);
+
+  EXPECT_EQ (setPipelineStateSync(pipeline, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT), 0);
+}
+
+/**
+ * @brief Test tensor_filter increasing framerate mid stream
+ */
+TEST_F (NNSFilterRateChangeTest, throttling_dynamic_change_inc) {
+  guint64 in, out, dup, drop;
+
+  this->target_framerate_1 = "15/1";
+  this->target_framerate_2 = DEFAULT_SOURCE_FRAMERATE;
 
   this->runPipeline();
 
