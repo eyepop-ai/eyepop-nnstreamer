@@ -1,3 +1,16 @@
+nnstreamer (2.4.1-ep1) UNRELEASED; urgency=medium
+
+  * PyTorch: link with torchvision
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Tue, 19 Mar 2024 13:25:06 -0700
+
+nnstreamer (2.3.0.0+nmu13) jammy; urgency=medium
+
+  * Non-maintainer upload.
+  * Allow PyTorch filter to be configured with less output tensors than PyTorch natively returns
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Tue, 19 Mar 2024 13:24:37 -0700
+
 nnstreamer (2.4.1.0) unstable bionic focal jammy sid; urgency=medium
 
   * 2.4.1 development starts (2.4.2-RC1)
