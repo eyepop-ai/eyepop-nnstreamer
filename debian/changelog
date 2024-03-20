@@ -1,4 +1,4 @@
-nnstreamer (2.4.1-ep1) UNRELEASED; urgency=medium
+nnstreamer (2.4.1) UNRELEASED; urgency=medium
 
   * PyTorch: link with torchvision
 
