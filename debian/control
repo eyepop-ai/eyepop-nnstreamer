@@ -67,13 +67,6 @@ Depends: nnstreamer-single, pytorch, ${shlibs:Depends}, ${misc:Depends}
 Description: NNStreamer Caffe2 Support
  This package allows nnstreamer to support caffe2.
 
-Package: nnstreamer-python3
-Architecture: any
-Multi-Arch: same
-Depends: nnstreamer, python3, python3-numpy, ${shlibs:Depends}, ${misc:Depends}
-Description: NNStreamer Python Custom Filter Support (3.x)
- This Package allows nnstreamer to support python custom filters
-
 Package: nnstreamer-edgetpu
 Architecture: any
 Multi-Arch: same
@@ -94,34 +87,6 @@ Multi-Arch: same
 Depends: nnstreamer-single, nnfw, ${shlibs:Depends}, ${misc:Depends}
 Description: NNStreamer NNFW (ONE) support
  This package allows nnstreamer to support NNFW (ONE, On-Device Neural Engine).
-
-Package: nnstreamer-tvm
-Architecture: any
-Multi-Arch: same
-Depends: nnstreamer, tvm-runtime, ${shlibs:Depends}, ${misc:Depends}
-Description: NNStreamer TVM support
- This package allows nnstreamer to support TVM
-
-Package: nnstreamer-onnxruntime
-Architecture: any
-Multi-Arch: same
-Depends: nnstreamer, onnxruntime, ${shlibs:Depends}, ${misc:Depends}
-Description: NNStreamer onnxruntime support
- This package allows nnstreamer to support onnxruntime
-
-Package: nnstreamer-protobuf
-Architecture: any
-Multi-Arch: same
-Depends: nnstreamer, ${shlibs:Depends}, ${misc:Depends}
-Description: NNStreamer Protobuf converter/decoder support
- This package allows to pack/unpack tensor streams to/from protobuf.
-
-Package: nnstreamer-flatbuf
-Architecture: any
-Multi-Arch: same
-Depends: nnstreamer, ${shlibs:Depends}, ${misc:Depends}
-Description: NNStreamer Flatbuf converter/decoder support
- This package allows to pack/unpack tensor streams to/from flatbuf.
 
 Package: nnstreamer-dev
 Architecture: any
