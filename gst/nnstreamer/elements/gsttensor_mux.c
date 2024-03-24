@@ -217,6 +217,7 @@ gst_tensor_mux_init (GstTensorMux * tensor_mux)
   tensor_mux->sync.option = NULL;
   tensor_mux->current_time = 0;
   tensor_mux->need_set_time = TRUE;
+
   gst_tensors_config_init (&tensor_mux->tensors_config);
 }
 
@@ -351,6 +352,10 @@ gst_tensor_mux_sink_event (GstCollectPads * pads, GstCollectData * data,
     case GST_EVENT_EOS:
       gst_tensor_mux_set_waiting (tensor_mux, FALSE);
       break;
+    case GST_EVENT_STREAM_START: {
+      tensor_mux->need_stream_start = TRUE;
+      break;
+    }
     default:
       break;
   }
@@ -495,12 +500,25 @@ gst_tensor_mux_collected (GstCollectPads * pads, GstTensorMux * tensor_mux)
   GST_DEBUG_OBJECT (tensor_mux, " all pads are collected ");
 
   if (tensor_mux->need_stream_start) {
-    g_autofree gchar *element_name = gst_element_get_name (tensor_mux);
-    g_autofree gchar *pad_name = gst_pad_get_name (tensor_mux->srcpad);
-    g_autofree gchar *sid = gst_pad_create_stream_id_printf (tensor_mux->srcpad,
-        GST_ELEMENT_CAST (tensor_mux), "%s-nnsmux-%s", element_name, pad_name);
-
-    gst_pad_push_event (tensor_mux->srcpad, gst_event_new_stream_start (sid));
+    gchar *stream_id = NULL;
+    GSList *iter = tensor_mux->collect->data;
+    while (iter) {
+      GstPad *pad = ((GstCollectData*)iter->data)->pad;
+      gchar *id = gst_pad_get_stream_id(pad);
+      if (stream_id == NULL) {
+        stream_id = id;
+      } else if (strstr(stream_id, id) == NULL) {
+        gchar *new_stream_id = g_strdup_printf("%s/%s", stream_id, id);
+        g_free(stream_id);
+        stream_id = new_stream_id;
+      }
+      iter = iter->next;
+    }
+    if (stream_id) {
+      gst_pad_push_event(tensor_mux->srcpad, gst_event_new_stream_start(stream_id));
+    } else {
+      GST_WARNING_OBJECT (tensor_mux, "gst_tensor_mux_collected need_stream_start == TRUE, but no pads with streeam id");
+    }
     tensor_mux->need_stream_start = FALSE;
   }
 
