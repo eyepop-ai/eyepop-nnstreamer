@@ -1,8 +1,15 @@
-nnstreamer (2.4.1) UNRELEASED; urgency=medium
+nnstreamer (2.4.1+nmu1) UNRELEASED; urgency=medium
+
+  * Non-maintainer upload.
+  * [bugfix] tensor_mux send stream-start events. 
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sun, 24 Mar 2024 14:06:30 -0700
+
+nnstreamer (2.4.1) jammy; urgency=medium
 
   * PyTorch: link with torchvision
 
- -- Torsten Schulz <torsten@eyepop.ai>  Tue, 19 Mar 2024 13:25:06 -0700
+ -- Torsten Schulz <torsten@eyepop.ai>  Sun, 24 Mar 2024 14:06:22 -0700
 
 nnstreamer (2.3.0.0+nmu13) jammy; urgency=medium
 
