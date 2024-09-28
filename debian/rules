@@ -44,23 +44,23 @@ override_dh_auto_configure:
 	mkdir -p ${BUILDDIR}
 ifeq ($(shell dpkg-vendor --derives-from Ubuntu && echo yes), yes)
 	meson --buildtype=plain --prefix=/usr --sysconfdir=/etc --libdir=lib/$(DEB_HOST_MULTIARCH) --bindir=lib/nnstreamer/bin --includedir=include \
-	-Denable-edgetpu=true -Denable-openvino=true -Dgrpc-support=disabled -Dmqtt-support=enabled \
+	-Denable-edgetpu=false -Denable-openvino=false -Dgrpc-support=disabled -Dmqtt-support=enabled \
 	-Ddatarepo-support=enabled \
-	-Dtf-support=enabled -Donnxruntime-support=enabled \
-	-Denable-tizen=false -Denable-test=true -Dinstall-test=true -Dsubplugindir=/usr/lib/nnstreamer $(FLOAT16) ${BUILDDIR}
+	-Dtf-support=disabled -Donnxruntime-support=disabled \
+	-Denable-tizen=false -Denable-test=false -Dinstall-test=true -Dsubplugindir=/usr/lib/nnstreamer $(FLOAT16) ${BUILDDIR}
 else
 	# Debian has less packages ready.
 	meson --buildtype=plain --prefix=/usr --sysconfdir=/etc --libdir=lib/$(DEB_HOST_MULTIARCH) --bindir=lib/nnstreamer/bin --includedir=include \
 	-Denable-edgetpu=false -Denable-openvino=false -Dgrpc-support=disabled -Dmqtt-support=enabled -Donnxruntime-support=enabled \
-	-Denable-tizen=false -Denable-test=true -Dinstall-test=true -Dsubplugindir=/usr/lib/nnstreamer ${BUILDDIR}
+	-Denable-tizen=false -Denable-test=true -Dinstall-test=false -Dsubplugindir=/usr/lib/nnstreamer ${BUILDDIR}
 endif
 
 override_dh_auto_build:
 	ninja -C ${BUILDDIR}
 	# A few modules are not avaiable in Ubuntu 22.04. Don't try to create them if not available.
-	if [ -f './build/ext/nnstreamer/tensor_filter/libnnstreamer_filter_nnfw.so' ]; then echo "NNFW exists" ; else rm debian/nnstreamer-nnfw.install; fi
-	if [ -f './build/ext/nnstreamer/tensor_filter/libnnstreamer_filter_pytorch.so' ]; then echo "pytorch exists" ; else rm debian/nnstreamer-pytorch.install; fi
-	if [ -f './build/ext/nnstreamer/tensor_filter/libnnstreamer_filter_caffe2.so' ]; then echo "caffe2 exists" ; else rm debian/nnstreamer-caffe2.install; fi
+	if [ -f './build/ext/nnstreamer/tensor_filter/libnnstreamer_filter_nnfw.so' ]; then echo "NNFW exists" ; else rm -f debian/nnstreamer-nnfw.install; fi
+	if [ -f './build/ext/nnstreamer/tensor_filter/libnnstreamer_filter_pytorch.so' ]; then echo "pytorch exists" ; else rm -f debian/nnstreamer-pytorch.install; fi
+	if [ -f './build/ext/nnstreamer/tensor_filter/libnnstreamer_filter_caffe2.so' ]; then echo "caffe2 exists" ; else rm -f debian/nnstreamer-caffe2.install; fi
 
 override_dh_auto_test:
 	./packaging/run_unittests_binaries.sh ./tests

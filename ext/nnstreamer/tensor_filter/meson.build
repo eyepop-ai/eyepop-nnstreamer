@@ -347,7 +347,7 @@ else # no tflite2
   endif
 endif
 
-torchvision_dp = dependency('torchvision')
+# torchvision_dp = dependency('torchvision')
 
 if pytorch_support_is_available
   if cxx.get_id() != 'gcc'
