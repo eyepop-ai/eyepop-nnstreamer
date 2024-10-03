@@ -56,7 +56,7 @@ pipeline {
                     
                         stage('Test') {
                             steps {
-                                runShellCommand(sh "ninja -C build/ test")   
+                                runShellCommand("ninja -C build/ test")   
                             }
                         }
                         stage('Debian build') {
@@ -132,7 +132,7 @@ pipeline {
                     
                         stage('Test') {
                             steps {
-                                runShellCommand(sh "ninja -C build/ test")   
+                                runShellCommand("ninja -C build/ test")   
                             }
                         }
                         stage('Debian build') {
