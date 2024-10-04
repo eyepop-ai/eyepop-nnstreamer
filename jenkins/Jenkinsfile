@@ -119,7 +119,7 @@ pipeline {
 
                         stage('Configure') {
                             steps {
-                                runShellCommand("sudo apt update && sudo apt install -y eyepop-tflite=3.0.0~linux-aarch64-jammy")
+                                runShellCommand("sudo apt update && sudo apt install -y eyepop-tflite=3.0.0~linux-aarch64-jammy libgtest-dev")
                                 runShellCommand("meson -Dwerror=false -Donnxruntime-support=disabled -Dtf-support=disabled -Dcaffe2-support=disabled -Dpython3-support=disabled build/ -Denable-test=false")
                             }
                         }
