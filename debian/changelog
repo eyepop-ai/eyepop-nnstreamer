@@ -1,4 +1,4 @@
-nnstreamer (2.4.1+1.0.0) jammy; urgency=medium
+nnstreamer (2.4.1-1.0.0) jammy; urgency=medium
 
   * Add support for aarch64 builds
   * Add more flexible build infrastructure across debuild and Jenkins 
