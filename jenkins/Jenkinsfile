@@ -68,7 +68,7 @@ pipeline {
                             steps {
                                 runShellCommand('uname -a && mkdir -p ./build.debian/linux_amd64/')
                                 runShellCommand('DEB_BUILD_OPTIONS="nocheck notest" debuild -b -us -uc -Plinux-amd64-jammy')
-                                runShellCommand('mv ../nnstreamer*.deb ../nnstreamer*.ddeb ./build.debian/linux_amd64/ && ls -la ./build.debian/linux_amd64/')
+                                runShellCommand('mv ../nnstreamer*.deb ../nnstreamer*.ddeb ../nnstreamer*.build ../nnstreamer*.buildinfo ../nnstreamer*.changes ./build.debian/linux_amd64/ && ls -la ./build.debian/linux_amd64/')
                             }
                         }
                         stage('Debian publish') {
@@ -144,7 +144,7 @@ pipeline {
                             steps {
                                 runShellCommand('uname -a && mkdir -p ./build.debian/linux_aarch64/')
                                 runShellCommand('DEB_BUILD_OPTIONS="nocheck notest" debuild -b -us -uc -Plinux-aarch64-jammy')
-                                runShellCommand('mv ../nnstreamer*.deb ../nnstreamer*.ddeb ./build.debian/linux_aarch64/ && ls -la ./build.debian/linux_aarch64/')
+                                runShellCommand('mv ../nnstreamer*.deb ../nnstreamer*.ddeb ../nnstreamer*.build ../nnstreamer*.buildinfo ../nnstreamer*.changes ./build.debian/linux_aarch64/ && ls -la ./build.debian/linux_aarch64/')
                             }
                         }
                         stage('Debian publish') {
