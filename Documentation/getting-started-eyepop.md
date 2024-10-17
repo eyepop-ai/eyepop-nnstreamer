@@ -64,6 +64,7 @@ Runtime dependencies:
 * `gstreamer1.0-plugins-good`
 
 EyePop-specific dependencies:
+* `eyepop-onnxruntime`
 * `eyepop-tflite`
 * `eyepop-torchvision` (amd64 only)
 
@@ -84,10 +85,10 @@ ninja -C build
 ninja -C build test
 ```
 
-To build/test for Ubuntu 22.04 on `aarch64` with support for TensorFlow Lite only:
+To build/test for Ubuntu 22.04 on `aarch64` with support for TensorFlow Lite and ONNX only:
 
 ```sh
-meson -Dwerror=false -Donnxruntime-support=disabled -Dtf-support=disabled -Dcaffe2-support=disabled -Dpython3-support=disabled build/ -Denable-test=false
+meson -Dwerror=false -Donnxruntime-support=enabled -Dtf-support=disabled -Dcaffe2-support=disabled -Dpython3-support=disabled build/ -Denable-test=false
 
 ninja -C build
 
