@@ -36,7 +36,7 @@ sudo echo "deb [trusted=yes] http://repo.dev.eyepop.xyz.s3.us-east-1.amazonaws.c
 sudo apt install build-essential debhelper devscripts gcc9 meson ninja-build libglib2.0-dev \
      libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libjson-glib-dev gstreamer1.0-tools \
      gstreamer1.0-plugins-good libgtest-dev libopencv-dev flex bison python3-dev libpaho-mqtt-dev \
-     eyepop-tflite eyepop-torchvision
+     eyepop-onnxruntime eyepop-tflite eyepop-torchvision
 ```
 
 Build tools:
