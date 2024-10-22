@@ -1,3 +1,10 @@
+nnstreamer (2.4.1-1.1.0) jammy; urgency=medium
+
+  * Enabled ONNX for aarch64
+  * Updated version of ml-dev to 3.1.0 (onnx, tensorflow[-cuda], tflite)
+
+ -- Tyler Stevens <tyler@eyepop.ai>  Thu, 17 Oct 2024 16:51:28 -0700
+
 nnstreamer (2.4.1-1.0.0) jammy; urgency=medium
 
   * Add support for aarch64 builds
