@@ -35,6 +35,7 @@
 #define __NNS_TENSOR_FILTER_CUSTOM_H__
 
 #include <stdint.h>
+#include "nnstreamer_api.h"
 #include "tensor_typedef.h"
 #include "nnstreamer_plugin_api_filter.h"
 
@@ -138,6 +139,6 @@ typedef struct _NNStreamer_custom_class NNStreamer_custom_class;
 /**
  * @brief A custom filter MUST define NNStreamer_custom. This object represents the custom filter itself.
  */
-extern NNStreamer_custom_class *NNStreamer_custom;
+NNS_API_EXPORT NNStreamer_custom_class *NNStreamer_custom;
 
 #endif /*__NNS_TENSOR_FILTER_CUSTOM_H__*/

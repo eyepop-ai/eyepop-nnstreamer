@@ -17,7 +17,6 @@ elif cc.has_header_symbol('android/log.h', '__android_log_print')
 endif
 
 nnstreamer_deps = [
-  libm_dep,
   gst_dep,
   gst_base_dep,
   gst_controller_dep,

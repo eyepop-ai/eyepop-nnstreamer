@@ -39,6 +39,9 @@ elif not meson.is_cross_build()
       add_project_arguments('-D__MACOS__=1', language: ['c', 'cpp'])
       build_platform = 'macos'
       so_ext = 'dylib'
+    else
+      build_platform = 'windows'
+      so_ext = 'dll'
     endif
   endif
 endif
@@ -150,8 +153,10 @@ gst_audio_dep = dependency('gstreamer-audio-' + gst_api_verision)
 gst_app_dep = dependency('gstreamer-app-' + gst_api_verision)
 gst_check_dep = dependency('gstreamer-check-' + gst_api_verision)
 
-libm_dep = cc.find_library('m') # cmath library
-libdl_dep = cc.find_library('dl') # DL library
+# Provided by MSVC
+# libm_dep = cc.find_library('m') # cmath library
+
+# libdl_dep = cc.find_library('dl') # DL library
 thread_dep = dependency('threads') # pthread for tensorflow-lite
 
 # Protobuf
@@ -692,10 +697,10 @@ configure_file(input: 'nnstreamer-internal.pc.in', output: 'nnstreamer-internal.
 )
 
 # Check whether mqtt broker is running or not.
-check_mosquitto = run_command ('bash', './tests/check_broker.sh', check : true).stdout()
-if check_mosquitto != ''
-  add_project_arguments('-D__MQTT_BROKER_ENABLED__=1', language: ['c', 'cpp'])
-endif
+# check_mosquitto = run_command ('bash', './tests/check_broker.sh', check : true).stdout()
+# if check_mosquitto != ''
+#   add_project_arguments('-D__MQTT_BROKER_ENABLED__=1', language: ['c', 'cpp'])
+# endif
 
 # Float16 Support
 if get_option('enable-float16')
@@ -731,7 +736,7 @@ endif
 # See if src-iio can be built or not
 gst18_dep = dependency('gstreamer-' + gst_api_verision, version : '>=1.8', required : false)
 tensor_src_iio_build = false
-if gst18_dep.found() and build_platform != 'macos'
+if gst18_dep.found() and build_platform != 'macos' and build_platform != 'windows'
   add_project_arguments('-D_ENABLE_SRC_IIO', language: ['c', 'cpp'])
   message('tensor_src_iio enabled')
   tensor_src_iio_build = true
