@@ -24,7 +24,7 @@
 #endif /* __TIZEN__ */
 #endif /* __arch64__ || __arm__ */
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 #include <sys/auxv.h>
 #else
 #define HWCAP_ASIMD 0x1
@@ -44,7 +44,7 @@ cpu_neon_accel_available (void)
 {
   gint neon_available = 0;
 
-#if defined(__aarch64__) || defined(__arm__)
+#if (defined(__aarch64__) || defined(__arm__))
   gulong hwcap_flag;
 
 #if defined(__aarch64__)
