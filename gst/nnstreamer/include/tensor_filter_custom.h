@@ -139,6 +139,6 @@ typedef struct _NNStreamer_custom_class NNStreamer_custom_class;
 /**
  * @brief A custom filter MUST define NNStreamer_custom. This object represents the custom filter itself.
  */
-NNS_API_EXPORT NNStreamer_custom_class *NNStreamer_custom;
+extern NNStreamer_custom_class *NNStreamer_custom;
 
 #endif /*__NNS_TENSOR_FILTER_CUSTOM_H__*/

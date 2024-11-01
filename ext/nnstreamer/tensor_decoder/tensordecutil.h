@@ -31,15 +31,15 @@ typedef struct {
   guint max_word_length; /**< The max size of labels */
 } imglabel_t;
 
-NNS_API_EXPORT void
+NNS_API void
 loadImageLabels (const char * label_path, imglabel_t *l);
 
-NNS_API_EXPORT void
+NNS_API void
 initSingleLineSprite (singleLineSprite_t v, rasters_t r, uint32_t pv);
 
-NNS_API_EXPORT void _free_labels (imglabel_t *data);
+NNS_API void _free_labels (imglabel_t *data);
 
-NNS_API_EXPORT void setFramerateFromConfig  (GstCaps *caps, const GstTensorsConfig * config);
+NNS_API void setFramerateFromConfig  (GstCaps *caps, const GstTensorsConfig * config);
 
 #ifdef __cplusplus
 }

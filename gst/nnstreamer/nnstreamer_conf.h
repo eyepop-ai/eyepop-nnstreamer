@@ -86,7 +86,7 @@ typedef struct
  * @param[in] force_reload TRUE if you want to clean up and load conf again.
  * @return TRUE if successful or skipped. FALSE if error reading something.
  */
-NNS_API_EXPORT gboolean
+NNS_API gboolean
 nnsconf_loadconf (gboolean force_reload);
 
 /**
@@ -98,7 +98,7 @@ nnsconf_loadconf (gboolean force_reload);
  *
  * This is mainly supposed to be used by CUSTOM_FILTERS
  */
-NNS_API_EXPORT const gchar *
+NNS_API const gchar *
 nnsconf_get_fullpath (const gchar * subpluginname, nnsconf_type_path type);
 
 /**
@@ -107,7 +107,7 @@ nnsconf_get_fullpath (const gchar * subpluginname, nnsconf_type_path type);
  * @param[in] fullpath The full path to the file.
  * @return True if the file is regular and can be added to the list.
  */
-NNS_API_EXPORT gboolean
+NNS_API gboolean
 nnsconf_validate_file (nnsconf_type_path type, const gchar * fullpath);
 
 /**
@@ -115,7 +115,7 @@ nnsconf_validate_file (nnsconf_type_path type, const gchar * fullpath);
  * @param[in] type The type (FILTERS/DECODERS/CUSTOM_FILTERS)
  * @return Predefined prefix string for given type.
  */
-NNS_API_EXPORT const gchar *
+NNS_API const gchar *
 nnsconf_get_subplugin_name_prefix (nnsconf_type_path type);
 
 /**
@@ -125,7 +125,7 @@ nnsconf_get_subplugin_name_prefix (nnsconf_type_path type);
  * @return total number of sub-plugins for given type
  * @note DO NOT free sub-plugins info
  */
-NNS_API_EXPORT guint
+NNS_API guint
 nnsconf_get_subplugin_info (nnsconf_type_path type, subplugin_info_s * info);
 
 /**
@@ -144,7 +144,7 @@ nnsconf_get_subplugin_info (nnsconf_type_path type, subplugin_info_s * info);
  * @param[in] key The key name, key = value, in .ini file.
  * @return The newly allocated string. A caller must free it. NULL if it's not available.
  */
-NNS_API_EXPORT gchar *
+NNS_API gchar *
 nnsconf_get_custom_value_string (const gchar * group, const gchar * key);
 
 /**
@@ -164,7 +164,7 @@ nnsconf_get_custom_value_string (const gchar * group, const gchar * key);
  * @param[in] def The default return value in case there is no value available.
  * @return The value interpreted as TRUE/FALSE.
  */
-NNS_API_EXPORT gboolean
+NNS_API gboolean
 nnsconf_get_custom_value_bool (const gchar * group, const gchar * key, gboolean def);
 
 /**
@@ -172,10 +172,10 @@ nnsconf_get_custom_value_bool (const gchar * group, const gchar * key, gboolean 
  * @param[out] str Preallocated string for the output (dump).
  * @param[in] size The size of given str.
  */
-NNS_API_EXPORT void
+NNS_API void
 nnsconf_dump (gchar * str, gulong size);
 
-NNS_API_EXPORT void
+NNS_API void
 nnsconf_subplugin_dump (gchar * str, gulong size);
 
 G_END_DECLS

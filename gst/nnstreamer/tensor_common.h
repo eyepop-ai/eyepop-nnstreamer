@@ -121,7 +121,7 @@ typedef struct
  * @note The responsibility of managing the memory of the GObject passed as a parameter
  *       lies outside this function.
  */
-NNS_API_EXPORT void 
+NNS_API void 
 gst_tensor_parse_config_file (const gchar *config_path, const GObject *object);
 
 /**
@@ -129,14 +129,14 @@ gst_tensor_parse_config_file (const gchar *config_path, const GObject *object);
  * @param[in] str The string value for the mode.
  * @return Corresponding mode for the string. SYNC_END for errors.
  */
-NNS_API_EXPORT tensor_time_sync_mode
+NNS_API tensor_time_sync_mode
 gst_tensor_time_sync_get_mode (const gchar * str);
 
 /**
  * @brief Get the time-sync mode string.
  * @return Corresponding mode string.
  */
-NNS_API_EXPORT const gchar *
+NNS_API const gchar *
 gst_tensor_time_sync_get_mode_string (tensor_time_sync_mode mode);
 
 /**
@@ -144,7 +144,7 @@ gst_tensor_time_sync_get_mode_string (tensor_time_sync_mode mode);
  * @param[in/out] filter "this" pointer. Sync mode & option MUST BE set already.
  * @return True if successfully set the option.
  */
-NNS_API_EXPORT gboolean
+NNS_API gboolean
 gst_tensor_time_sync_set_option_data (tensor_time_sync_data * sync);
 
 /**
@@ -157,7 +157,7 @@ gst_tensor_time_sync_set_option_data (tensor_time_sync_data * sync);
  * @param current_time Current time
  * @param tensors_buf Generated GstBuffer for Collected Buffer
  */
-NNS_API_EXPORT gboolean
+NNS_API gboolean
 gst_tensor_time_sync_get_current_time (GstCollectPads * collect, tensor_time_sync_data * sync, GstClockTime * current_time, GstBuffer * tensors_buf);
 
 /**
@@ -165,7 +165,7 @@ gst_tensor_time_sync_get_current_time (GstCollectPads * collect, tensor_time_syn
  * It should clear old buffer and reset pad data.
  * @param collect Collect pad.
  */
-NNS_API_EXPORT void
+NNS_API void
 gst_tensor_time_sync_flush (GstCollectPads * collect);
 
 /**
@@ -179,7 +179,7 @@ gst_tensor_time_sync_flush (GstCollectPads * collect);
  * @param configs Configuration Info for Collected Buffer
  * @param is_eos True when EOS (end-of-stream)
  */
-NNS_API_EXPORT gboolean
+NNS_API gboolean
 gst_tensor_time_sync_buffer_from_collectpad (GstCollectPads * collect, tensor_time_sync_data * sync, GstClockTime current_time, GstBuffer * tensors_buf, GstTensorsConfig * configs, gboolean * is_eos);
 
 /**
@@ -191,7 +191,7 @@ gst_tensor_time_sync_buffer_from_collectpad (GstCollectPads * collect, tensor_ti
  * @param config tensors config structure
  * @return Newly allocated buffer. Null if failed. Caller should unref the buffer using gst_buffer_unref().
  */
-NNS_API_EXPORT GstBuffer *
+NNS_API GstBuffer *
 gst_tensor_buffer_from_config (GstBuffer * in, GstTensorsConfig * config);
 
 /**
@@ -200,7 +200,7 @@ gst_tensor_buffer_from_config (GstBuffer * in, GstTensorsConfig * config);
  * @param config tensors config structure
  * @return caps for given config. Caller is responsible for unreffing the returned caps.
  */
-NNS_API_EXPORT GstCaps *
+NNS_API GstCaps *
 gst_tensor_pad_caps_from_config (GstPad * pad, const GstTensorsConfig * config);
 
 /**
@@ -209,7 +209,7 @@ gst_tensor_pad_caps_from_config (GstPad * pad, const GstTensorsConfig * config);
  * @param config tensors config structure
  * @return caps for given config. Caller is responsible for unreffing the returned caps.
  */
-NNS_API_EXPORT GstCaps *
+NNS_API GstCaps *
 gst_tensor_pad_possible_caps_from_config (GstPad * pad, const GstTensorsConfig * config);
 
 /**
@@ -219,7 +219,7 @@ gst_tensor_pad_possible_caps_from_config (GstPad * pad, const GstTensorsConfig *
  *
  * If pad does not have tensor caps return _NNS_TENSOR_FORMAT_END
  */
-NNS_API_EXPORT tensor_format
+NNS_API tensor_format
 gst_tensor_pad_get_format (GstPad *pad);
 
 /**
@@ -241,7 +241,7 @@ gst_tensor_pad_get_format (GstPad *pad);
  * @brief Gets new hash table for tensor aggregation.
  * @return Newly allocated hash table, caller should release this using g_hash_table_destroy().
  */
-NNS_API_EXPORT GHashTable *
+NNS_API GHashTable *
 gst_tensor_aggregation_init (void);
 
 /**
@@ -249,14 +249,14 @@ gst_tensor_aggregation_init (void);
  * @param table a hash table instance initialized with gst_tensor_aggregation_init()
  * @param key the key to look up (set null to get default adapter)
  */
-NNS_API_EXPORT void
+NNS_API void
 gst_tensor_aggregation_clear (GHashTable * table, const guint32 key);
 
 /**
  * @brief Clears buffers from all adapters in hash table.
  * @param table a hash table instance initialized with gst_tensor_aggregation_init()
  */
-NNS_API_EXPORT void
+NNS_API void
 gst_tensor_aggregation_clear_all (GHashTable * table);
 
 /**
@@ -265,7 +265,7 @@ gst_tensor_aggregation_clear_all (GHashTable * table);
  * @param key the key to look up (set null to get default adapter)
  * @return gst-adapter instance. DO NOT release this instance.
  */
-NNS_API_EXPORT GstAdapter *
+NNS_API GstAdapter *
 gst_tensor_aggregation_get_adapter (GHashTable * table, const guint32 key);
 
 /******************************************************
