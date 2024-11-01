@@ -173,7 +173,7 @@ struct _GstTensorTrainerFramework
  *
  * @note Do not change the subplugins callbacks after probing the filter.
  */
-NNS_API_EXPORT int
+NNS_API int
 nnstreamer_trainer_probe (GstTensorTrainerFramework * ttsp);
 
 /**
@@ -182,7 +182,7 @@ nnstreamer_trainer_probe (GstTensorTrainerFramework * ttsp);
  * @return TRUE if unregistered. FALSE is failed.
  */
 
-NNS_API_EXPORT int
+NNS_API int
 nnstreamer_trainer_exit (GstTensorTrainerFramework * ttsp);
 
 /**
@@ -192,7 +192,7 @@ nnstreamer_trainer_exit (GstTensorTrainerFramework * ttsp);
  * @param type Event types that subplugins must send to tensor_trainer
  * @param data Optional data for the event
  */
-NNS_API_EXPORT void
+NNS_API void
 nnstreamer_trainer_notify_event (GstTensorTrainerEventNotifier * notifier,
     GstTensorTrainerEventType type, void *data);
 

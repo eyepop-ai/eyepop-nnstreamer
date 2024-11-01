@@ -91,7 +91,7 @@ typedef struct _NNStreamerExternalConverter
  * @return NNStreamerExternalConverter if subplugin is found.
  *         NULL if not found or the sub-plugin object has an error.
  */
-NNS_API_EXPORT const NNStreamerExternalConverter *
+NNS_API const NNStreamerExternalConverter *
 nnstreamer_converter_find (const char *name);
 
 /**
@@ -99,18 +99,18 @@ nnstreamer_converter_find (const char *name);
  * @param[in] ex Converter sub-plugin to be registered.
  * @return TRUE if registered. FALSE is failed or duplicated.
  */
-NNS_API_EXPORT int registerExternalConverter (NNStreamerExternalConverter * ex);
+NNS_API int registerExternalConverter (NNStreamerExternalConverter * ex);
 
 /**
  * @brief Converter's sub-plugin may call this to unregister itself.
  * @param[in] prefix The name of converter sub-plugin.
  */
-NNS_API_EXPORT void unregisterExternalConverter (const char *prefix);
+NNS_API void unregisterExternalConverter (const char *prefix);
 
 /**
  * @brief set custom property description for tensor converter sub-plugin
  */
-NNS_API_EXPORT void
+NNS_API void
 nnstreamer_converter_set_custom_property_desc (const char *name, const char *prop, ...);
 
 #ifdef __cplusplus

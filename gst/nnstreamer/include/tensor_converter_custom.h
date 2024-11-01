@@ -39,7 +39,7 @@ typedef GstBuffer * (* tensor_converter_custom) (GstBuffer *in_buf,
  * @param[in/out] data The internal data for the function
  * @return 0 if success. -ERRNO if error.
  */
-NNS_API_EXPORT int
+NNS_API int
 nnstreamer_converter_custom_register (const gchar *name, tensor_converter_custom func, void *data);
 
 /**
@@ -47,7 +47,7 @@ nnstreamer_converter_custom_register (const gchar *name, tensor_converter_custom
  * @param[in] name The registered name of tensor_converter custom callback function.
  * @return 0 if success. -ERRNO if error.
  */
-NNS_API_EXPORT int
+NNS_API int
 nnstreamer_converter_custom_unregister (const gchar *name);
 
 G_END_DECLS

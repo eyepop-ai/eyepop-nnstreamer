@@ -60,31 +60,31 @@ extern "C" {
 #define PyEval_InitThreads_IfGood()     do { PyEval_InitThreads(); } while (0)
 #endif
 
-NNS_API_EXPORT tensor_type getTensorType (NPY_TYPES npyType);
-NNS_API_EXPORT NPY_TYPES getNumpyType (tensor_type tType);
-NNS_API_EXPORT int loadScript (PyObject **core_obj, const gchar *module_name, const gchar *class_name);
-NNS_API_EXPORT int openPythonLib (void **handle);
-NNS_API_EXPORT int addToSysPath (const gchar *path);
-NNS_API_EXPORT int parseTensorsInfo (PyObject *result, GstTensorsInfo *info);
-NNS_API_EXPORT PyObject * PyTensorShape_New (PyObject * shape_cls, const GstTensorInfo *info);
+NNS_API tensor_type getTensorType (NPY_TYPES npyType);
+NNS_API NPY_TYPES getNumpyType (tensor_type tType);
+NNS_API int loadScript (PyObject **core_obj, const gchar *module_name, const gchar *class_name);
+NNS_API int openPythonLib (void **handle);
+NNS_API int addToSysPath (const gchar *path);
+NNS_API int parseTensorsInfo (PyObject *result, GstTensorsInfo *info);
+NNS_API PyObject * PyTensorShape_New (PyObject * shape_cls, const GstTensorInfo *info);
 
 /**
  * @brief Py_Initialize common wrapper for Python subplugins
  * @note This prevents a python-using subplugin finalizing another subplugin's python interpreter by sharing the reference counter.
  */
-NNS_API_EXPORT void nnstreamer_python_init_refcnt ();
+NNS_API void nnstreamer_python_init_refcnt ();
 
 /**
  * @brief Py_Finalize common wrapper for Python subplugins
  * @note This prevents a python-using subplugin finalizing another subplugin's python interpreter by sharing the reference counter.
  */
-NNS_API_EXPORT void nnstreamer_python_fini_refcnt ();
+NNS_API void nnstreamer_python_fini_refcnt ();
 
 /**
  * @brief Check Py_Init status for python eval functions.
  * @return 0 if it's ready. negative error value if it's not ready.
  */
-NNS_API_EXPORT int nnstreamer_python_status_check ();
+NNS_API int nnstreamer_python_status_check ();
 
 #ifdef __cplusplus
 } /* extern "C" */

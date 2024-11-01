@@ -12,7 +12,13 @@
 #  define _NNS_IMPORT
 #endif
 
-#define NNS_API_EXPORT _NNS_EXPORT extern
-#define NNS_API_IMPORT _NNS_IMPORT extern
+// TODO: this is backwards and should be inverted
+// Did this to avoid having to track down all the libraries that produce headers with NNS_API
+// for the purposes of the prototype
+#ifdef NNS_API_IMPORTS
+#define NNS_API _NNS_IMPORT
+#else
+#define NNS_API _NNS_EXPORT
+#endif
 
 #endif

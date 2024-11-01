@@ -811,13 +811,15 @@ if onnxruntime_support_is_available
     filter_sub_onnxruntime_sources,
     dependencies: nnstreamer_filter_onnxruntime_deps,
     install: true,
-    install_dir: filter_subplugin_install_dir
+    install_dir: filter_subplugin_install_dir,
+    cpp_args: '-DNNS_API_IMPORTS=1'
   )
 
   static_library('nnstreamer_filter_onnxruntime',
     filter_sub_onnxruntime_sources,
     dependencies: nnstreamer_filter_onnxruntime_deps,
     install: true,
-    install_dir: nnstreamer_libdir
+    install_dir: nnstreamer_libdir,
+    cpp_args: '-DNNS_API_IMPORTS=1'
   )
 endif
