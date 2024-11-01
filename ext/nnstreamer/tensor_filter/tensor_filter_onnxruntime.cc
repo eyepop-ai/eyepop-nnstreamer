@@ -58,7 +58,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   } onnx_node_info_s;
 
   bool configured;
-  char *model_path; /**< The model *.onnx file */
+  ORTCHAR_T *model_path; /**< The model *.onnx file */
 
   Ort::Session session;
   Ort::SessionOptions sessionOptions;
@@ -313,7 +313,18 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
     throw std::runtime_error (err_msg);
   }
 
+#ifdef _WIN32
+  // TODO: add error checking and check type of model_files
+  char *model_path_char = g_strdup (prop->model_files[0]);
+
+  int wlen = mbstowcs(NULL, model_path_char, 0);
+  model_path = (wchar_t*) malloc((wlen + 1) * sizeof(wchar_t));
+
+  mbstowcs(model_path, model_path_char, wlen + 1);
+  g_free(model_path_char);
+#else
   model_path = g_strdup (prop->model_files[0]);
+#endif
 
   /* Read a model */
   env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
