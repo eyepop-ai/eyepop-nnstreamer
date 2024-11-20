@@ -196,7 +196,7 @@ the experimental `nnstreamer` build):
 ```sh
 meson setup builddir \
   --prefix=/home/tyler/workspace/install/gst \
-  -Dauto_features=disabled -Dgstreamer:tools=enabled -Dgood=enabled -Ddevtools=enabled -Dgstreamer:check=enabled -Dbad=enabled -Dwebrtc=enabled -Dlibnice=enabled -Dgst-plugins-bad:dtls=enabled -Dgst-plugins-bad:sctp=enabled -Dgst-plugins-bad:srtp=enabled -Dgst-plugins-good:rtpmanager=enabled -Dgst-plugins-base:videotestsrc=enabled -Dgst-plugins-base:audiotestsrc=enabled -Dgst-plugins-bad:videoparsers=enabled -Dgst-plugins-good:flv=enabled -Dgst-plugins-bad:rtmp=enabled -Dugly=enabled -Dgpl=enabled -Dgst-plugins-ugly:x264=enabled -Dgst-plugins-bad:openh264=enabled -Dlibav=enabled 
+  -Dauto_features=disabled -Dgstreamer:tools=enabled -Dgood=enabled -Ddevtools=enabled -Dgstreamer:check=enabled -Dbad=enabled -Dwebrtc=enabled -Dlibnice=enabled -Dgst-plugins-bad:dtls=enabled -Dgst-plugins-bad:sctp=enabled -Dgst-plugins-bad:srtp=enabled -Dgst-plugins-good:rtpmanager=enabled -Dgst-plugins-good:autodetect=enabled -Dgst-plugins-base:videotestsrc=enabled -Dgst-plugins-base:videoconvertscale=enabled -Dgst-plugins-base:app=enabled -Dgst-plugins-base:audiotestsrc=enabled -Dgst-plugins-base:overlaycomposition=enabled -Dgst-plugins-bad:videoparsers=enabled -Dgst-plugins-good:flv=enabled -Dgst-plugins-bad:rtmp=enabled -Dugly=enabled -Dgpl=enabled -Dgst-plugins-ugly:x264=enabled -Dgst-plugins-bad:openh264=enabled -Dlibav=enabled -Dgst-plugins-base:pango=enabled -Dgst-plugins-bad:curl=enabled -Dgst-plugins-good:isomp4=enabled
 ```
 
 ```sh
