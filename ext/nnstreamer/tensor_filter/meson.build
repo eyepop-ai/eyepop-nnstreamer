@@ -690,6 +690,9 @@ if tensorrt_support_is_available
   )
 endif
 
+# TODO: fix
+lua_support_is_available = false
+
 if lua_support_is_available
   if lua_support_deps[0].version().version_compare('>=5.3')
     message ('tensor-filter::lua does not support Lua >= 5.3, yet. Fix #3531 first.')
