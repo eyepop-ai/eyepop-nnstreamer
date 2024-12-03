@@ -409,7 +409,9 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators)
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
     } else if (has_qnn) {
-      sessionOptions.AppendExecutionProvider("QNN");
+      std::unordered_map<std::string, std::string> provider_options;
+      provider_options["backend_path"] = "QnnHtp.dll";
+      sessionOptions.AppendExecutionProvider("QNN", provider_options);
     } else if (has_rocm) {
       auto api = Ort::GetApi();
       OrtROCMProviderOptions* options = nullptr;

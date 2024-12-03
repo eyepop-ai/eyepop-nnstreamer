@@ -214,26 +214,29 @@ blocked by this MSYS2 package issue: https://github.com/msys2/MINGW-packages/iss
 
 ### Install onnxruntime
 
-Download v.1.19.2 of the CPU-accelerated ONNX runtime from
-https://github.com/microsoft/onnxruntime/releases/tag/v1.19.2
-
-Unpack it to your desired install directory (in my case, `/home/tyler/workspace/install/onnx`).
-There should be `lib/` and `include/` directories with no subdirectories, just files.
-
-Create a `pkgconfig/` directory in the `lib/` folder and add the following `libonnxruntime.pc` file.
-Again, adjust paths as necessary.
+- Download the `nuget` CLI tool from https://www.nuget.org/downloads
+- Create a directory to install Nuget packages to (e.g. `C:\Users\<you>\Downloads\nuget_install`)
+- Install the ONNXRuntime.QNN package to that directory: `nuget install Microsoft.ML.OnnxRuntime.QNN -Version 1.20.1 -OutputDirectory <nuget_install_directory>`
+- Create your desired install directory (in my case, `/home/tyler/workspace/install/onnx_qnn`)
+- In your desired install directory, create and populate the following hierarchy:
+  - `include\`: copy headers from `<nuget_install>\Microsoft.ML.OnnxRuntime.QNN.1.20.1\build\native\include`
+  - `lib\`: copy everything from `<nuget_install>\Microsoft.ML.OnnxRuntime.QNN.1.20.1\runtimes\win-arm64\native`
+    - TODO: is all of this required?
+  - `lib\pkgconfig\`: add the following `libonnxruntime.pc` file
 
 ```
-prefix=C:/msys64/home/tyler/workspace/install/onnx
+prefix=C:/msys64/home/tyler/workspace/install/onnx_qnn
 includedir=${prefix}/include
 libdir=${prefix}/lib
 
 Name: ONNX runtime
 Description: ONNX runtime libraries and headers
-Version: 1.19.2
-Libs: -L${libdir} -lonnxruntime -lonnxruntime_providers_shared
+Version: 1.20.24.1119
+Libs: -L${libdir} -lonnxruntime
 Cflags: -I${includedir}
 ```
+
+On my machine, I needed to remove the onnxruntime DLLs from C:/System32/ (by adding an `.old` prefix) to ensure that they were not picked up by gstreamer or nnstreamer. This is a temporary solution.
 
 ### Build nnstreamer
 
