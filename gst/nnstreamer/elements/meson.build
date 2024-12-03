@@ -18,7 +18,9 @@ nnstreamer_sources += files(
   'gsttensor_sparseutil.c',
   'gsttensor_split.c',
   'gsttensor_transform.c',
-  'gsttensor_trainer.c'
+  'gsttensor_trainer.c',
+  'nnstreamer-orc.c',
+  'nnstreamer-orc.h',
 )
 
 # gsttensorsrc
@@ -47,6 +49,6 @@ if orcc_support_is_available
     output: orcsrc + '.c',
     command: [ script, '@INPUT@', '@OUTPUT@' ])
 
-  nnstreamer_sources += [orc_c, orc_h]
-  nnstreamer_internal_deps += declare_dependency(sources: orc_h)
+  # nnstreamer_sources += [orc_c, orc_h]
+  nnstreamer_internal_deps += declare_dependency(sources: ['nnstreamer-orc.h'])
 endif

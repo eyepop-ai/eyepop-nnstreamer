@@ -35,6 +35,7 @@
 #define __NNS_TENSOR_FILTER_CUSTOM_H__
 
 #include <stdint.h>
+#include "nnstreamer_api.h"
 #include "tensor_typedef.h"
 #include "nnstreamer_plugin_api_filter.h"
 

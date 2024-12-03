@@ -135,5 +135,151 @@ sudo apt install ../nnstreamer*.deb
 
 See `eyepop-ml-dev`'s README.
 
+## Notes on MSYS2 build for Windows on ARM
+
+These instructions are experimental, subject to change, and will eventually be integrated with the
+setup instructions above after testing and verification.
+
+Note: MSYS2 uses your entire Windows username for `$HOME`, which may include spaces. To work around
+this, I actually used `/home/tyler/workspace/install` as the base of the install path. Change paths
+below as desired, but using the paths below will work since the MSYS2 environment apparently doesn't
+have strict permissions. Need to investigate further.
+
+Note: on my machine, running a `pacman` command often resulted in two instances. It was necessary to
+kill the one with (usually) lower memory through the Windows task manager and/or run the command
+again (ignoring errors from the first run). After running a command successfully, check the Task
+Manager (or run `ps -e | grep 'pacman'`) for any processes to kill.
+
+### Initial setup
+
+* Install MSYS2: https://github.com/msys2/msys2-installer/releases/tag/2024-07-27
+* Run the `MSYS2 CLANGARM64` application (`"C:\msys64\clangarm64.exe"`, if installed to the default
+  path)
+
+Update and install build tools (run this twice -- will close the window once for a system upgrade):
+
+```sh
+pacman -S \
+  mingw-w64-clang-aarch64-clang \
+  mingw-w64-clang-aarch64-cmake \
+  mingw-w64-clang-aarch64-gtest \
+  mingw-w64-clang-aarch64-make \
+  mingw-w64-clang-aarch64-pkgconf \
+  mingw-w64-clang-aarch64-python3.12
+```
+
+Install dependencies for nnstreamer (can be combined with above instructions -- just separating for
+tracking):
+
+```sh
+pacman -S \
+  mingw-w64-clang-aarch64-glib2 \
+  mingw-w64-clang-aarch64-libffi
+```
+
+### Build gstreamer
+
+Clone `gstreamer` from https://gitlab.freedesktop.org/gstreamer/gstreamer and check out the latest
+tag (1.24.9).
+
+Set up a Python virtual environment to install necessary tools. Note: installing CMake through `pip`
+did not work for me, hence the system package above.
+
+```sh
+python3.12 -m venv .venv
+pip3 install meson ninja
+```
+
+To build and install `gstreamer` (note the GST-specific install directory to keep it separate from
+the experimental `nnstreamer` build):
+
+```sh
+meson setup builddir \
+  --prefix=/home/tyler/workspace/install/gst \
+  -Dauto_features=disabled -Dgstreamer:tools=enabled -Dgood=enabled -Ddevtools=enabled -Dgstreamer:check=enabled -Dbad=enabled -Dwebrtc=enabled -Dlibnice=enabled -Dgst-plugins-bad:dtls=enabled -Dgst-plugins-bad:sctp=enabled -Dgst-plugins-bad:srtp=enabled -Dgst-plugins-good:rtpmanager=enabled -Dgst-plugins-good:autodetect=enabled -Dgst-plugins-base:videotestsrc=enabled -Dgst-plugins-base:videoconvertscale=enabled -Dgst-plugins-base:app=enabled -Dgst-plugins-base:audiotestsrc=enabled -Dgst-plugins-base:overlaycomposition=enabled -Dgst-plugins-bad:videoparsers=enabled -Dgst-plugins-good:flv=enabled -Dgst-plugins-bad:rtmp=enabled -Dugly=enabled -Dgpl=enabled -Dgst-plugins-ugly:x264=enabled -Dgst-plugins-bad:openh264=enabled -Dlibav=enabled -Dgst-plugins-base:pango=enabled -Dgst-plugins-bad:curl=enabled -Dgst-plugins-good:isomp4=enabled -Dgst-plugins-base:playback=enabled -Dgst-plugins-good:png=enabled -Dgst-plugins-good:jpeg=enabled
+```
+
+```sh
+meson compile -C builddir
+```
+
+```sh
+meson install -C builddir
+```
+
+### tflite2 notes
+
+My preference would have been to build tflite from `eyepop-ml-dev`, but compilation is currently
+blocked by this MSYS2 package issue: https://github.com/msys2/MINGW-packages/issues/22160
+
+### Install onnxruntime
+
+- Download the `nuget` CLI tool from https://www.nuget.org/downloads
+- Create a directory to install Nuget packages to (e.g. `C:\Users\<you>\Downloads\nuget_install`)
+- Install the ONNXRuntime.QNN package to that directory: `nuget install Microsoft.ML.OnnxRuntime.QNN -Version 1.20.1 -OutputDirectory <nuget_install_directory>`
+- Create your desired install directory (in my case, `/home/tyler/workspace/install/onnx_qnn`)
+- In your desired install directory, create and populate the following hierarchy:
+  - `include\`: copy headers from `<nuget_install>\Microsoft.ML.OnnxRuntime.QNN.1.20.1\build\native\include`
+  - `lib\`: copy everything from `<nuget_install>\Microsoft.ML.OnnxRuntime.QNN.1.20.1\runtimes\win-arm64\native`
+    - TODO: is all of this required?
+  - `lib\pkgconfig\`: add the following `libonnxruntime.pc` file
+
+```
+prefix=C:/msys64/home/tyler/workspace/install/onnx_qnn
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: ONNX runtime
+Description: ONNX runtime libraries and headers
+Version: 1.20.24.1119
+Libs: -L${libdir} -lonnxruntime
+Cflags: -I${includedir}
+```
+
+On my machine, I needed to remove the onnxruntime DLLs from C:/System32/ (by adding an `.old` prefix) to ensure that they were not picked up by gstreamer or nnstreamer. This is a temporary solution.
+
+### Build nnstreamer
+
+Clone `eyepop-nnstreamer` from https://github.com/eyepop-ai/eyepop-nnstreamer and check out the
+`tyler/msys2` branch.
+
+Again, set up a Python virtual environment to install necessary tools. Note: installing CMake
+through `pip` did not work for me, hence the system package above.
+
+```sh
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip3 install meson ninja
+```
+
+To build `nnstreamer` (which should pick up the ONNX runtime):
+
+```sh
+meson setup builddir \
+  --prefix=/home/tyler/workspace/install/nnstreamer \
+  -Dwerror=false -Denable-test=false -Denable-nnstreamer-check=false \
+  -Dpkg_config_path=/home/tyler/workspace/install/onnx/lib/pkgconfig:/usr/lib/pkgconfig
+```
+
+```sh
+ninja -C builddir
+```
+
+### Next steps
+
+* Build `eyepop-pipeline`
+* Run an ONNX model
+* Fix all the warnings I introduced (e.g. duplicate definitions of `NNS_API`)
+* Add proper error handling for `char*` to `wchar_t*` conversions
+* Properly handle conditional build options for Linux and Windows (where I've just overwritten the
+  defaults to hack together the Windows build)
+* Make `nnstreamer` tests work
+* Make this work in CI
+* Figure out the weird `pacman` behavior
+* Properly document the Windows build process and current status
+
+It's likely that at this point, we'll discover several runtime issues with the nnstreamer build
+and/or environment setup. But the build works on my machine! (for now)
+
 [docker-setup]: https://app.gitbook.com/o/lp5TZAZIwu5jXdzZth9T/s/0fWYYHCrIOcShgRMiWhf/readme/howtos/running-as-docker-container
 [dockerfiles]: https://github.com/eyepop-ai/eyepop-docker-images
