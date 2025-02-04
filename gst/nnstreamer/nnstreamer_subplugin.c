@@ -109,13 +109,14 @@ _search_subplugin (subpluginType type, const gchar * name, const gchar * path)
 {
   subpluginData *spdata = NULL;
   GModule *module;
-
+  g_warning("_search_subplugin name=%s path=%s", name, path);
   g_return_val_if_fail (name != NULL, NULL);
   g_return_val_if_fail (path != NULL, NULL);
 
   module = g_module_open (path, G_MODULE_BIND_LOCAL);
   /* If this is a correct subplugin, it will register itself */
   if (module == NULL) {
+    g_warning("_search_subplugin ERROR 1 name=%s path=%s", name, path);
     ml_loge ("Cannot open %s(%s) with error %s.", name, path,
         g_module_error ());
     return NULL;
@@ -127,11 +128,13 @@ _search_subplugin (subpluginType type, const gchar * name, const gchar * path)
     g_ptr_array_add (handles, (gpointer) module);
     G_UNLOCK (splock);
   } else {
+    g_warning("_search_subplugin ERROR 2 name=%s path=%s", name, path);
     ml_loge
         ("nnstreamer_subplugin of %s(%s) is broken. It does not call register_subplugin with its init function.",
         name, path);
     g_module_close (module);
   }
+  g_warning("_search_subplugin name=%s path=%s found=%s", name, path, spdata->name);
 
   return spdata;
 }
@@ -162,7 +165,7 @@ get_subplugin (subpluginType type, const char *name)
     /** Search and register if found with the conf */
     nnsconf_type_path conf_type = (nnsconf_type_path) type;
     const gchar *fullpath = nnsconf_get_fullpath (name, conf_type);
-
+    g_warning("_get_subplugin_data name=%s fullpath=%s", name, fullpath);
     if (nnsconf_validate_file (conf_type, fullpath)) {
       spdata = _search_subplugin (type, name, fullpath);
     }
