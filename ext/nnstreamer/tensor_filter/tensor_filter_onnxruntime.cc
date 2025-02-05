@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1-only */
+ /* SPDX-License-Identifier: LGPL-2.1-only */
 /**
  * NNStreamer tensor_filter, sub-plugin for onnxruntime
  * Copyright (C) 2023 Suyeon Kim <suyeon5.kim@samsung.com>
@@ -192,6 +192,7 @@ onnxruntime_subplugin::convertTensorInfo (onnx_node_info_s &node, GstTensorsInfo
       throw std::runtime_error ("Failed to convert ONNX shape.");
 
     _info->name = g_strdup (node.names[i]);
+    g_warning("convertTensorInfo %d %s %d -> %d", i, _info->name, node.types[i], _info->type);
   }
 }
 
@@ -411,6 +412,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators)
     } else if (has_qnn) {
       std::unordered_map<std::string, std::string> provider_options;
       provider_options["backend_path"] = "QnnHtp.dll";
+      provider_options["enable_htp_fp16_precision"] = "1";
       sessionOptions.AppendExecutionProvider("QNN", provider_options);
     } else if (has_rocm) {
       auto api = Ort::GetApi();
@@ -457,9 +459,11 @@ onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *ou
 
   try {
     /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
+    g_warning("before: ORT session Run with input size %d %s", inputNode.tensors.size ());
     session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
         inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
         outputNode.tensors.data (), outputNode.count);
+    g_warning("after: ORT session Run with input size %d", outputNode.tensors.size ());
   } catch (const Ort::Exception &exception) {
     const std::string err_msg
         = "ERROR running model inference: " + (std::string) exception.what ();
