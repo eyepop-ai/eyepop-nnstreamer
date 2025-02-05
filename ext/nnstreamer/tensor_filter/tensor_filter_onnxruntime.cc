@@ -426,6 +426,36 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators)
   }
 }
 
+static void _dump_tensor(const char* name, const void* data, size_t num_floats) {
+  gchar *templ;
+  gchar *name_used;
+  int f;
+  FILE* fd;
+  templ = g_strdup_printf("%s_XXXXXX.bin", name);
+  f = g_file_open_tmp (templ, &name_used, NULL);
+  write(f, data, num_floats*sizeof(float));
+  close(f);
+  g_free(templ);
+  g_warning("wrote %d bytes into %s", num_floats*sizeof(float), name_used);
+  g_free (name_used);
+
+  templ = g_strdup_printf("%s_XXXXXX.float", name);
+  f = g_file_open_tmp (templ, &name_used, NULL);
+  fd = fdopen(f, "w");
+  fprintf (fd, "[");
+  for (int i = 0; i < num_floats; i++) {
+    if (i > 0) {
+      fprintf (fd, ", %f", ((float*)data)[i]);
+    } else {
+      fprintf (fd, "%f", ((float*)data)[i]);
+    }
+  }
+  fprintf (fd, "]");
+  fclose(fd);
+  g_free(templ);
+  g_warning("wrote %d floats into %s", num_floats, name_used);
+}
+
 /**
  * @brief Method to execute the model.
  */
@@ -442,32 +472,45 @@ onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *ou
     throw std::runtime_error ("Invalid input buffer, it is NULL.");
   if (!output)
     throw std::runtime_error ("Invalid output buffer, it is NULL.");
-
+  size_t num_input_floats = 0;
   /* Set input to tensor */
   for (i = 0; i < inputNode.count; ++i) {
     inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
         input[i].data, input[i].size, inputNode.shapes[i].data (),
         inputNode.shapes[i].size (), inputNode.types[i]));
+    size_t tensor_size = 1;
+    for (size_t j = 0; j < inputNode.shapes[i].size(); j++) {
+      tensor_size *= inputNode.shapes[i][j];
+    }
+    num_input_floats += tensor_size;
   }
 
+  size_t num_output_floats = 0;
   /* Set output to tensor */
   for (i = 0; i < outputNode.count; ++i) {
     outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
         output[i].data, output[i].size, outputNode.shapes[i].data (),
         outputNode.shapes[i].size (), outputNode.types[i]));
+    size_t tensor_size = 1;
+    for (size_t j = 0; j < outputNode.shapes[i].size(); j++) {
+      tensor_size *= outputNode.shapes[i][j];
+    }
+    num_output_floats += tensor_size;
   }
 
   try {
     /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
-    g_warning("before: ORT session Run with input size:%d #count:%d first:%f",
-        inputNode.tensors.size (), inputNode.tensors.data()->GetCount(),
+    g_warning("before: ORT session Run with input size:%d first:%f",
+        inputNode.tensors.size (),
         inputNode.tensors.data()->GetTensorData<float>()[0]);
+    _dump_tensor("in", inputNode.tensors.data()->GetTensorRawData(), num_input_floats);
     session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
         inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
         outputNode.tensors.data (), outputNode.count);
-    g_warning("after: ORT session Run with input size:%d #count:%d first:%f",
-        outputNode.tensors.size (), outputNode.tensors.data()->GetCount(),
+    g_warning("after: ORT session Run with input size:%d first:%f",
+        outputNode.tensors.size (),
         outputNode.tensors.data()->GetTensorData<float>()[0]);
+    _dump_tensor("out", inputNode.tensors.data()->GetTensorRawData(), num_output_floats);
   } catch (const Ort::Exception &exception) {
     const std::string err_msg
         = "ERROR running model inference: " + (std::string) exception.what ();
