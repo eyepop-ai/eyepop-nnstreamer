@@ -28,7 +28,7 @@
 
 #define ORT_API_MANUAL_INIT 1
 
-#include <onnxruntime_cxx_api.h>
+#include <onnxruntime/onnxruntime_cxx_api.h>
 
 namespace nnstreamer
 {
@@ -459,11 +459,15 @@ onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *ou
 
   try {
     /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
-    g_warning("before: ORT session Run with input size %d %s", inputNode.tensors.size ());
+    g_warning("before: ORT session Run with input size:%d #count:%d first:%f",
+        inputNode.tensors.size (), inputNode.tensors.data()->GetCount(),
+        inputNode.tensors.data()->GetTensorData<float>()[0]);
     session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
         inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
         outputNode.tensors.data (), outputNode.count);
-    g_warning("after: ORT session Run with input size %d", outputNode.tensors.size ());
+    g_warning("after: ORT session Run with input size:%d #count:%d first:%f",
+        outputNode.tensors.size (), outputNode.tensors.data()->GetCount(),
+        outputNode.tensors.data()->GetTensorData<float>()[0]);
   } catch (const Ort::Exception &exception) {
     const std::string err_msg
         = "ERROR running model inference: " + (std::string) exception.what ();
