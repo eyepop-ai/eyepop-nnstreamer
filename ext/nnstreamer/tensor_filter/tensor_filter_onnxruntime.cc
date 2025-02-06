@@ -28,7 +28,7 @@
 
 #define ORT_API_MANUAL_INIT 1
 
-#include <onnxruntime/onnxruntime_cxx_api.h>
+#include <onnxruntime_cxx_api.h>
 
 namespace nnstreamer
 {
@@ -412,7 +412,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators)
     } else if (has_qnn) {
       std::unordered_map<std::string, std::string> provider_options;
       provider_options["backend_path"] = "QnnHtp.dll";
-      provider_options["enable_htp_fp16_precision"] = "1";
+      provider_options["enable_htp_fp16_precision"] = "0";
       sessionOptions.AppendExecutionProvider("QNN", provider_options);
     } else if (has_rocm) {
       auto api = Ort::GetApi();
@@ -433,17 +433,18 @@ static void _dump_tensor(const char* name, const void* data, size_t num_floats) 
   FILE* fd;
   templ = g_strdup_printf("%s_XXXXXX.bin", name);
   f = g_file_open_tmp (templ, &name_used, NULL);
-  write(f, data, num_floats*sizeof(float));
-  close(f);
+  fd = fdopen(f, "wb");
+  fwrite(data, sizeof(float), num_floats, fd);
+  fclose(fd);
   g_free(templ);
-  g_warning("wrote %d bytes into %s", num_floats*sizeof(float), name_used);
+  g_warning("wrote %llu bytes into %s", num_floats*sizeof(float), name_used);
   g_free (name_used);
 
   templ = g_strdup_printf("%s_XXXXXX.float", name);
   f = g_file_open_tmp (templ, &name_used, NULL);
   fd = fdopen(f, "w");
   fprintf (fd, "[");
-  for (int i = 0; i < num_floats; i++) {
+  for (size_t i = 0; i < num_floats; i++) {
     if (i > 0) {
       fprintf (fd, ", %f", ((float*)data)[i]);
     } else {
@@ -453,7 +454,7 @@ static void _dump_tensor(const char* name, const void* data, size_t num_floats) 
   fprintf (fd, "]");
   fclose(fd);
   g_free(templ);
-  g_warning("wrote %d floats into %s", num_floats, name_used);
+  g_warning("wrote %llu floats into %s", num_floats, name_used);
 }
 
 /**
@@ -500,17 +501,17 @@ onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *ou
 
   try {
     /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
-    g_warning("before: ORT session Run with input size:%d first:%f",
-        inputNode.tensors.size (),
+    g_warning("before: ORT session Run with input size:%llu first:%f",
+        inputNode.tensors.size(),
         inputNode.tensors.data()->GetTensorData<float>()[0]);
     _dump_tensor("in", inputNode.tensors.data()->GetTensorRawData(), num_input_floats);
     session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
         inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
         outputNode.tensors.data (), outputNode.count);
-    g_warning("after: ORT session Run with input size:%d first:%f",
-        outputNode.tensors.size (),
+    g_warning("after: ORT session Run with output size:%llu first:%f",
+        outputNode.tensors.size(),
         outputNode.tensors.data()->GetTensorData<float>()[0]);
-    _dump_tensor("out", inputNode.tensors.data()->GetTensorRawData(), num_output_floats);
+    _dump_tensor("out", outputNode.tensors.data()->GetTensorRawData(), num_output_floats);
   } catch (const Ort::Exception &exception) {
     const std::string err_msg
         = "ERROR running model inference: " + (std::string) exception.what ();
