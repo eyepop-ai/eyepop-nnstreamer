@@ -4,6 +4,66 @@ nnstreamer (2.4.2.0) unstable bionic focal jammy sid; urgency=medium
 
  -- MyungJoo Ham <myungjoo.ham@samsung.com>  Mon, 02 Sep 2024 11:00:00 +0900
 
+nnstreamer (2.4.1-1.2.0) UNRELEASED; urgency=medium
+
+  * bump eyepop-onnxruntime to 3.2.0
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sat, 11 Jan 2025 14:45:22 -0800
+
+nnstreamer (2.4.1-1.1.0) jammy; urgency=medium
+
+  [ Tyler Stevens ]
+  * Enabled ONNX for aarch64
+  * Updated version of ml-dev to 3.1.0 (onnx, tensorflow[-cuda], tflite)
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sat, 11 Jan 2025 14:45:00 -0800
+
+nnstreamer (2.4.1-1.0.0) jammy; urgency=medium
+
+  * Add support for aarch64 builds
+  * Add more flexible build infrastructure across debuild and Jenkins 
+
+ -- Tyler Stevens <tyler@eyepop.ai>  Wed, 09 Oct 2024 16:10:03 -0700
+
+nnstreamer (2.4.1+nmu4) UNRELEASED; urgency=medium
+
+  * tensor_filter ONNX: allow accleration
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sat, 28 Sep 2024 15:14:18 -0700
+
+nnstreamer (2.4.1+nmu3) jammy; urgency=medium
+
+  * Non-maintainer upload.
+  * switch to eyepop-ml-dev 2.40 
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sat, 28 Sep 2024 15:14:10 -0700
+
+nnstreamer (2.4.1+nmu2) jammy; urgency=medium
+
+  * Include onnxruntime filter
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Wed, 25 Sep 2024 18:58:54 -0700
+
+nnstreamer (2.4.1+nmu1) UNRELEASED; urgency=medium
+
+  * Non-maintainer upload.
+  * [bugfix] tensor_mux send stream-start events. 
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sun, 24 Mar 2024 14:06:30 -0700
+
+nnstreamer (2.4.1) jammy; urgency=medium
+
+  * PyTorch: link with torchvision
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Sun, 24 Mar 2024 14:06:22 -0700
+
+nnstreamer (2.3.0.0+nmu13) jammy; urgency=medium
+
+  * Non-maintainer upload.
+  * Allow PyTorch filter to be configured with less output tensors than PyTorch natively returns
+
+ -- Torsten Schulz <torsten@eyepop.ai>  Tue, 19 Mar 2024 13:24:37 -0700
+
 nnstreamer (2.4.1.0) unstable bionic focal jammy sid; urgency=medium
 
   * 2.4.1 development starts (2.4.2-RC1)
