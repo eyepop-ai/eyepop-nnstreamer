@@ -43,15 +43,20 @@ decoder_sub_bounding_boxes_sources = [
   'tensordec-font.c'
 ]
 
+nnstreamer_decoder_bounding_boxes_deps = [nnstreamer_dep, glib_dep, gst_dep]
+if build_platform != 'windows'
+  nnstreamer_decoder_bounding_boxes_deps += libm_dep
+endif
+
 shared_library('nnstreamer_decoder_bounding_boxes',
   decoder_sub_bounding_boxes_sources,
-  dependencies: [nnstreamer_dep, glib_dep, gst_dep, libm_dep],
+  dependencies: nnstreamer_decoder_bounding_boxes_deps,
   install: true,
   install_dir: decoder_subplugin_install_dir
 )
 static_library('nnstreamer_decoder_bounding_boxes',
   decoder_sub_bounding_boxes_sources,
-  dependencies: [nnstreamer_dep, glib_dep, gst_dep, libm_dep],
+  dependencies: nnstreamer_decoder_bounding_boxes_deps,
   install: true,
   install_dir: nnstreamer_libdir
 )
