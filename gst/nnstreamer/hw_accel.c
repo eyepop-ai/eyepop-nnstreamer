@@ -24,7 +24,7 @@
 #endif /* __TIZEN__ */
 #endif /* __arch64__ || __arm__ */
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__CYGWIN__)
 #include <sys/auxv.h>
 #else
 #define HWCAP_ASIMD 0x1

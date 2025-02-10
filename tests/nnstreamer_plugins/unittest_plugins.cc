@@ -3674,6 +3674,7 @@ TEST (testTensorConverter, flexToStaticInvalidBuffer2_n)
 
 #ifdef HAVE_ORC
 #include "nnstreamer-orc.h"
+#endif
 
 /**
  * @brief Test for tensor_transform orc functions (add constant value)

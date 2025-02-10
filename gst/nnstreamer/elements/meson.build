@@ -42,11 +42,30 @@ if orcc_support_is_available
 
   # ORC generated codes incur a few warnings. Ignore warnings of generated files.
   script = find_program('ignore_warning.sh')
-  orc_c = custom_target(orcsrc + '.c',
-    input: orc_c_org,
-    output: orcsrc + '.c',
-    command: [ script, '@INPUT@', '@OUTPUT@' ])
+
+  if build_platform == 'windows'
+    script_path = script.path()
+    drive_letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
+    foreach letter : drive_letters
+      windows_prefix = letter + ':' + '/'
+      if script_path.startswith(windows_prefix)
+        # str.replace() is available in Meson 0.58, but want to keep the minimum required version as
+        # close as possible to the project's minimum required version.
+        # Also, only need to replace the start of paths here.
+        script_path = '/' + letter.to_lower() + '/' + script_path.substring(3)
+      endif
+    endforeach
+
+    orc_c = custom_target(orcsrc + '.c',
+      input: orc_c_org,
+      output: orcsrc + '.c',
+      command: [ ['bash', script_path], '@INPUT@', '@OUTPUT@' ])
+  else
+    orc_c = custom_target(orcsrc + '.c',
+      input: orc_c_org,
+      output: orcsrc + '.c',
+      command: [ script, '@INPUT@', '@OUTPUT@' ])
+  endif
 
   nnstreamer_sources += [orc_c, orc_h]
-  nnstreamer_internal_deps += declare_dependency(sources: orc_h)
 endif
