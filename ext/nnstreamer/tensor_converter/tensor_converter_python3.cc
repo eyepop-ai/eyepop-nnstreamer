@@ -73,7 +73,13 @@ PYConverterCore::PYConverterCore (const char *_script_path)
     : script_path (_script_path)
 {
   if (openPythonLib (&handle))
+  {
+#ifdef _WIN32
+    throw std::runtime_error ("Failed to open Python library");
+#else
     throw std::runtime_error (dlerror ());
+#endif
+  }
 
   _import_array (); /** for numpy */
 
@@ -109,9 +115,14 @@ PYConverterCore::~PYConverterCore ()
   Py_SAFEDECREF (shape_cls);
   PyErr_Clear ();
 
+#ifdef _WIN32
+  FreeLibrary((HMODULE)handle);
+#else
   dlclose (handle);
+#endif
   g_mutex_clear (&py_mutex);
 }
+
 
 /**
  * @brief	convert any media stream to tensor
