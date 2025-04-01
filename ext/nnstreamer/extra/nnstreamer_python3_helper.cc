@@ -23,6 +23,14 @@
 #include <nnstreamer_util.h>
 #include "nnstreamer_python3_helper.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#define SO_EXT "dll"
+#else
+#include <dlfcn.h>
+#define SO_EXT "so"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -335,6 +343,7 @@ loadScript (PyObject **core_obj, const gchar *module_name, const gchar *class_na
 int
 openPythonLib (void **handle)
 {
+#ifndef _WIN32
   /**
    * To fix import error of python extension modules
    * (e.g., multiarray.x86_64-linux-gnu.so: undefined symbol: PyExc_SystemError)
@@ -355,6 +364,22 @@ openPythonLib (void **handle)
     if (NULL == *handle)
       return -1;
   }
+#else
+  gchar libname[32] = {
+    0,
+  };
+
+  g_snprintf (libname, sizeof (libname), "python%d%d.%s", PY_MAJOR_VERSION,
+      PY_MINOR_VERSION, SO_EXT);
+  *handle = (void *)LoadLibrary (libname);
+  if (NULL == *handle) {
+    g_snprintf (libname, sizeof (libname), "python%d%dm.%s",
+        PY_MAJOR_VERSION, PY_MINOR_VERSION, SO_EXT);
+    *handle = (void *)LoadLibrary (libname);
+    if (NULL == *handle)
+      return -1;
+  }
+#endif
 
   return 0;
 }
