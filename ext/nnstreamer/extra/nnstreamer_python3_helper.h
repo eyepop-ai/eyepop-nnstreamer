@@ -18,7 +18,11 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <Python.h>
 #include <patchlevel.h>
+#ifndef _WIN32
 #include <dlfcn.h>
+#else
+#include <windows.h>
+#endif
 #include <numpy/arrayobject.h>
 #include <structmember.h>
 #include <nnstreamer_api.h>
@@ -29,6 +33,8 @@
 
 #ifdef __MACOS__
 #define SO_EXT "dylib"
+#elif defined(_WIN32)
+#define SO_EXT "dll"
 #else
 #define SO_EXT "so.1.0"
 #endif
