@@ -152,7 +152,13 @@ PYCore::PYCore (const char *_script_path, const char *_custom)
     : script_path (_script_path), module_args (_custom != NULL ? _custom : "")
 {
   if (openPythonLib (&handle))
+  {
+#ifdef _WIN32
+    throw std::runtime_error ("Failed to open Python library");
+#else
     throw std::runtime_error (dlerror ());
+#endif
+  }
 
   _import_array (); /** for numpy */
 
@@ -198,7 +204,11 @@ PYCore::~PYCore ()
   PyErr_Clear ();
   Py_UNLOCK ();
 
+#ifdef _WIN32
+  FreeLibrary((HMODULE)handle);
+#else
   dlclose (handle);
+#endif
 }
 
 /**
@@ -523,7 +533,11 @@ PYCore::freeOutputTensors (void *data)
     Py_SAFEDECREF (it->second);
     outputArrayMap.erase (it);
   } else {
+#ifdef _WIN32
+    ml_loge ("Cannot find output data: %p", data);
+#else
     ml_loge ("Cannot find output data: 0x%lx", (unsigned long) data);
+#endif
   }
 }
 
