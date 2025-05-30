@@ -83,7 +83,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   void cleanup ();
   void clearNodeInfo (onnx_node_info_s &node);
   void convertTensorInfo (onnx_node_info_s &node, GstTensorsInfo &info);
-  int convertTensorDim (std::vector<int64_t> &shapes, tensor_dim &dim);
+  int convertTensorDim (std::vector<int64_t> &shapes, tensor_dim &dim, bool &is_dynamic);
   int convertTensorType (ONNXTensorElementDataType _type, tensor_type &type);
   void setAccelerator (const char *accelerators);
 
@@ -97,9 +97,12 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   tensor_filter_subplugin &getEmptyInstance ();
   void configure_instance (const GstTensorFilterProperties *prop);
   void invoke (const GstTensorMemory *input, GstTensorMemory *output);
+  void invoke_dynamic (GstTensorFilterProperties *prop,
+      const GstTensorMemory *input, GstTensorMemory *output);
   void getFrameworkInfo (GstTensorFilterFrameworkInfo &info);
   int getModelInfo (model_info_ops ops, GstTensorsInfo &in_info, GstTensorsInfo &out_info);
   int eventHandler (event_ops ops, GstTensorFilterFrameworkEventData &data);
+  int convertElementDataType (tensor_type type, ONNXTensorElementDataType &_type);
 };
 
 /**
@@ -181,17 +184,20 @@ onnxruntime_subplugin::convertTensorInfo (onnx_node_info_s &node, GstTensorsInfo
   GstTensorInfo *_info;
   gst_tensors_info_init (std::addressof (info));
   info.num_tensors = (unsigned int) node.count;
-
+  bool is_dynamic = false;
   for (guint i = 0; i < info.num_tensors; ++i) {
     _info = gst_tensors_info_get_nth_info (std::addressof (info), i);
 
     if (convertTensorType (node.types[i], _info->type) != 0)
       throw std::runtime_error ("Failed to convert ONNX data type.");
 
-    if (convertTensorDim (node.shapes[i], _info->dimension) != 0)
+    if (convertTensorDim (node.shapes[i], _info->dimension, is_dynamic) != 0)
       throw std::runtime_error ("Failed to convert ONNX shape.");
 
     _info->name = g_strdup (node.names[i]);
+  }
+  if (is_dynamic) {
+    info.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
   }
 }
 
@@ -200,10 +206,10 @@ onnxruntime_subplugin::convertTensorInfo (onnx_node_info_s &node, GstTensorsInfo
  * @return 0 if OK. non-zero if error.
  */
 int
-onnxruntime_subplugin::convertTensorDim (std::vector<int64_t> &shapes, tensor_dim &dim)
+onnxruntime_subplugin::convertTensorDim (std::vector<int64_t> &shapes, tensor_dim &dim, bool &is_dynamic)
 {
   size_t i, rank;
-
+  is_dynamic = false;
   rank = shapes.size ();
   if (rank <= 0 || rank > NNS_TENSOR_RANK_LIMIT) {
     nns_loge ("Invalid shape (rank %zu, max: %d)", rank, NNS_TENSOR_RANK_LIMIT);
@@ -213,8 +219,13 @@ onnxruntime_subplugin::convertTensorDim (std::vector<int64_t> &shapes, tensor_di
   /* the order of dimension is reversed at CAPS negotiation */
   for (i = 0; i < rank; i++) {
     /* free dimensions are treated as 1 if not overridden */
-    shapes[rank - i - 1] = (shapes[rank - i - 1] > 0) ? shapes[rank - i - 1] : 1;
-    dim[i] = shapes[rank - i - 1];
+    if (shapes[rank - i - 1] < 0) {
+      is_dynamic = true;
+      dim[i] = 1;
+    } else {
+      dim[i] = shapes[rank - i - 1];
+    }
+//    shapes[rank - i - 1] = (shapes[rank - i - 1] > 0) ? shapes[rank - i - 1] : 1;
   }
 
   /* fill remaining entries with 0 */
@@ -271,6 +282,58 @@ onnxruntime_subplugin::convertTensorType (ONNXTensorElementDataType _type, tenso
     default:
       nns_loge ("Tensor type not supported: %d", (gint) _type);
       type = _NNS_END;
+      return -EINVAL;
+  }
+
+  return 0;
+}
+
+/**
+ * @brief Convert the type of tensor.
+ * @return 0 if OK. non-zero if error.
+ */
+int
+onnxruntime_subplugin::convertElementDataType (tensor_type type, ONNXTensorElementDataType &_type)
+{
+  switch (type) {
+    case _NNS_INT8:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+      break;
+    case _NNS_UINT8:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+      break;
+    case _NNS_INT16:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+      break;
+    case _NNS_UINT16:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
+      break;
+    case _NNS_INT32:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+      break;
+    case _NNS_UINT32:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
+      break;
+    case _NNS_INT64:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+      break;
+    case _NNS_UINT64:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
+      break;
+    case _NNS_FLOAT32:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+      break;
+    case _NNS_FLOAT64:
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+      break;
+    case _NNS_FLOAT16:
+#ifdef FLOAT16_SUPPORT
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+      break;
+#endif
+    default:
+      nns_loge ("Element type not supported: %d", (gint) type);
+      _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
       return -EINVAL;
   }
 
@@ -430,10 +493,11 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators)
 }
 
 /**
- * @brief Method to execute the model.
+ * @brief Method to execute the model with dynamic tensors.
  */
 void
-onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *output)
+onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
+    const GstTensorMemory *input, GstTensorMemory *output)
 {
   size_t i;
   g_assert (configured);
@@ -446,13 +510,49 @@ onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *ou
   if (!output)
     throw std::runtime_error ("Invalid output buffer, it is NULL.");
 
-  /* Set input to tensor */
-  for (i = 0; i < inputNode.count; ++i) {
-    inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
-        input[i].data, input[i].size, inputNode.shapes[i].data (),
-        inputNode.shapes[i].size (), inputNode.types[i]));
+  if (prop == nullptr || prop->input_meta.format == _NNS_TENSOR_FORMAT_STATIC) {
+    /* Set input to tensor */
+    for (i = 0; i < inputNode.count; ++i) {
+      inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
+          input[i].data, input[i].size, inputNode.shapes[i].data (),
+          inputNode.shapes[i].size (), inputNode.types[i]));
+    }
+  } else if (prop->input_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE) {
+    g_log("eyepop-ai",G_LOG_LEVEL_WARNING, "invoke_dynamic: %s", gst_tensors_info_to_string(&prop->input_meta));
+    inputNode.count = prop->input_meta.num_tensors;
+    for (i = 0; i < prop->input_meta.num_tensors; i++) {
+      g_log("eyepop-ai",G_LOG_LEVEL_WARNING,
+          "invoke_dynamic: %ld: %llu [%u, %u, %u, %u]", i,  (unsigned long long)input[i].size,
+          prop->input_meta.info[i].dimension[0],
+          prop->input_meta.info[i].dimension[1],
+          prop->input_meta.info[i].dimension[2],
+          prop->input_meta.info[i].dimension[3]
+          );
+      auto element_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+      std::vector<int64_t> shape;
+      for (auto j = 0; j < NNS_TENSOR_RANK_LIMIT; j++) {
+        if (prop->input_meta.info[i].dimension[j] > 0) {
+          shape.push_back (prop->input_meta.info[i].dimension[j]);
+        } else {
+          break;
+        }
+      }
+      convertElementDataType (
+          static_cast<tensor_type> (prop->input_meta.info[i].type), element_data_type);
+      inputNode.tensors.emplace_back (Ort::Value::CreateTensor (
+          memInfo,
+          input[i].data,
+          input[i].size,
+          shape.data(),
+          shape.size(),
+          element_data_type));
+    }
+  } else {
+    const std::string err_msg
+        = "ERROR running model inference: does not support tensor format " +
+          (std::string) gst_tensor_get_format_string (prop->input_meta.format);
+    throw std::runtime_error (err_msg);
   }
-
   /* Set output to tensor */
   for (i = 0; i < outputNode.count; ++i) {
     outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
@@ -470,6 +570,16 @@ onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *ou
         = "ERROR running model inference: " + (std::string) exception.what ();
     throw std::runtime_error (err_msg);
   }
+}
+
+
+/**
+ * @brief Method to execute the model.
+ */
+void
+onnxruntime_subplugin::invoke (const GstTensorMemory *input, GstTensorMemory *output)
+{
+  invoke_dynamic(nullptr, input, output);
 }
 
 /**
