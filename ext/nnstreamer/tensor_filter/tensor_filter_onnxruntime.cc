@@ -27,6 +27,10 @@
 #include <nnstreamer_util.h>
 
 #define ORT_API_MANUAL_INIT 1
+#ifdef G_LOG_DOMAIN
+#undef G_LOG_DOMAIN
+#endif
+#define G_LOG_DOMAIN "nnstreamer-onnxruntime"
 
 #include <onnxruntime_cxx_api.h>
 
@@ -518,16 +522,8 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
           inputNode.shapes[i].size (), inputNode.types[i]));
     }
   } else if (prop->input_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE) {
-    g_log("eyepop-ai",G_LOG_LEVEL_WARNING, "invoke_dynamic: %s", gst_tensors_info_to_string(&prop->input_meta));
     inputNode.count = prop->input_meta.num_tensors;
     for (i = 0; i < prop->input_meta.num_tensors; i++) {
-      g_log("eyepop-ai",G_LOG_LEVEL_WARNING,
-          "invoke_dynamic: %ld: %llu [%u, %u, %u, %u]", i,  (unsigned long long)input[i].size,
-          prop->input_meta.info[i].dimension[0],
-          prop->input_meta.info[i].dimension[1],
-          prop->input_meta.info[i].dimension[2],
-          prop->input_meta.info[i].dimension[3]
-          );
       auto element_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
       std::vector<int64_t> shape;
       for (auto j = 0; j < NNS_TENSOR_RANK_LIMIT; j++) {
@@ -553,22 +549,55 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
           (std::string) gst_tensor_get_format_string (prop->input_meta.format);
     throw std::runtime_error (err_msg);
   }
-  /* Set output to tensor */
-  for (i = 0; i < outputNode.count; ++i) {
-    outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
-        output[i].data, output[i].size, outputNode.shapes[i].data (),
-        outputNode.shapes[i].size (), outputNode.types[i]));
-  }
 
-  try {
-    /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
-    session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
-        inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
-        outputNode.tensors.data (), outputNode.count);
-  } catch (const Ort::Exception &exception) {
-    const std::string err_msg
-        = "ERROR running model inference: " + (std::string) exception.what ();
-    throw std::runtime_error (err_msg);
+  if (prop == nullptr || (prop->output_meta.format == _NNS_TENSOR_FORMAT_STATIC && !prop->invoke_dynamic)) {
+    /* Set output to tensor */
+    for (i = 0; i < outputNode.count; ++i) {
+      outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
+          output[i].data, output[i].size, outputNode.shapes[i].data (),
+          outputNode.shapes[i].size (), outputNode.types[i]));
+    }
+    try {
+      /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
+      session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
+          inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
+          outputNode.tensors.data (), outputNode.count);
+    } catch (const Ort::Exception &exception) {
+      const std::string err_msg
+          = "ERROR running model inference: " + (std::string) exception.what ();
+      throw std::runtime_error (err_msg);
+    }
+  } else if (prop->input_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE || prop->invoke_dynamic) {
+    try {
+      /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
+      auto outputTensors = session.Run (Ort::RunOptions{ nullptr }, inputNode.names.data (),
+          inputNode.tensors.data (), inputNode.count, outputNode.names.data (),
+          outputNode.count);
+
+      gst_tensors_info_init (&prop->output_meta);
+      prop->output_meta.num_tensors = outputTensors.size();
+      prop->output_meta.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
+
+      size_t scalar_count = 1;
+
+      for (i = 0; i < outputTensors.size(); i++) {
+        auto outputInfo = outputTensors[i].GetTensorTypeAndShapeInfo();
+        if (convertTensorType (outputInfo.GetElementType(), prop->output_meta.info[i].type) != 0) {
+          throw std::runtime_error ("Failed to convert ONNX data type.");
+        }
+        for (unsigned int shapeI = 0; shapeI < outputInfo.GetShape().size(); shapeI++) {
+          std::cout << outputInfo.GetShape()[shapeI] << ", ";
+          prop->output_meta.info[i].dimension[shapeI] = outputInfo.GetShape()[shapeI];
+          scalar_count *= prop->output_meta.info[i].dimension[shapeI];
+        }
+        output[i].size = scalar_count * gst_tensor_get_element_size(prop->output_meta.info[i].type);
+        output[i].data = g_memdup2(outputTensors[i].GetTensorRawData(), output[i].size);
+      }
+    } catch (const Ort::Exception &exception) {
+      const std::string err_msg
+          = "ERROR running model inference: " + (std::string) exception.what ();
+      throw std::runtime_error (err_msg);
+    }
   }
 }
 
