@@ -151,13 +151,14 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   bool configured;
   ORTCHAR_T *model_path; /**< The model *.onnx file */
 
+  Ort::SessionOptions sessionOptions;
+  Ort::Env env;
+
   Ort::Session session;
   Ort::IoBinding ioBinding;
   Ort::RunOptions runOptions;
   Ort::Allocator allocator;
 
-  Ort::SessionOptions sessionOptions;
-  Ort::Env env;
   Ort::MemoryInfo memInfo;
 
   bool has_cuda;
@@ -205,12 +206,12 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
  */
 onnxruntime_subplugin::onnxruntime_subplugin ()
     : configured{ false }, model_path{ nullptr },
+      sessionOptions{ nullptr },
+      env{ nullptr },
       session{ nullptr },
       ioBinding{ nullptr },
       runOptions{ nullptr },
-      sessionOptions{ nullptr },
       allocator{ nullptr },
-      env{ nullptr },
       memInfo{ nullptr },
       has_cuda{ false }, has_qnn{ false },
       has_rocm{ false }, has_openvino{ false },
