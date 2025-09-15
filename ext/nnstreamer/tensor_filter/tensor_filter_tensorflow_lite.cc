@@ -1146,6 +1146,15 @@ TFLiteCore::loadModel ()
   err = interpreter->loadModel (num_threads, delegate);
   interpreter->unlock ();
 
+  if (err != 0 && delegate == TFLITE_DELEGATE_GPU) {
+    ml_logi ("Failed to load model '%s' on GPU (TensorFlow-lite interpreter->loadModel() has returned %d. Trying to fallback to XNNPACK\n",
+        interpreter->model_path, err);
+    interpreter->lock ();
+    if (interpreter->loadModel (num_threads, TFLITE_DELEGATE_XNNPACK) == 0) {
+      err = 0;
+    }
+    interpreter->unlock ();
+  }
   return err;
 }
 
