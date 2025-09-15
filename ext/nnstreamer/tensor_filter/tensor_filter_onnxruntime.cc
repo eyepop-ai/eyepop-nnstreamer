@@ -539,11 +539,12 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   allocator = Ort::Allocator(session, memInfo);
 
   /* Initialize input info */
+  Ort::AllocatorWithDefaultOptions namesAllocator;
   inputNode.count = 0;
 
   for (i = 0; i < num_inputs; i++) {
     /* Get input name */
-    auto input_name = session.GetInputNameAllocated (i, allocator);
+    auto input_name = session.GetInputNameAllocated (i, namesAllocator);
     inputNode.names_allocated_strings.push_back (std::move (input_name));
     inputNode.names.push_back (inputNode.names_allocated_strings.back ().get ());
 
@@ -565,7 +566,7 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   }
   for (i = 0; i < num_outputs; i++) {
     /* Get output name */
-    auto output_name = session.GetOutputNameAllocated (i, allocator);
+    auto output_name = session.GetOutputNameAllocated (i, namesAllocator);
     if (!output_names.empty() && output_names.count(output_name.get()) == 0) {
       g_info("skipping model output tensor %s, not pre-configured", output_name.get());
       continue;
