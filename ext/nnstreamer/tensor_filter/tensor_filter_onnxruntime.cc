@@ -630,22 +630,23 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         sessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"enable_cuda_graph", "has_user_compute_stream", "cudnn_conv_use_max_workspace", "cudnn_conv_algo_search"};
-        std::vector<const char*> values{invoke_dynamic? "0": "1", "1", "1", "HEURISTIC"};
-        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), 1));
+        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "cudnn_conv1d_pad_to_nc1d"};
+        std::vector<const char*> values{invoke_dynamic? "0": "1", "HEURISTIC", "1"};
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
+        g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on sessionOptions (%d)", keys.size(), invoke_dynamic);
       }
-      if (invoke_dynamic)
       {
         fallbackSessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"enable_cuda_graph", "has_user_compute_stream", "cudnn_conv_use_max_workspace", "cudnn_conv_algo_search"};
-        std::vector<const char*> values{"0", "1", "1", "HEURISTIC"};
-        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), 1));
+        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search"};
+        std::vector<const char*> values{"0", "HEURISTIC"};
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         fallbackSessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
+        g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on fallbackSessionOptions", keys.size());
       }
     } else if (has_qnn) {
       sessionOptions = Ort::SessionOptions();
@@ -653,6 +654,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
       std::unordered_map<std::string, std::string> provider_options;
       provider_options["backend_path"] = "QnnHtp.dll";
       sessionOptions.AppendExecutionProvider("QNN", provider_options);
+      g_info("onnxruntime_subplugin::setAccelerator qnn");
 #else
       sessionOptions.AppendExecutionProvider("QNN");
 #endif
@@ -663,11 +665,14 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
       Ort::ThrowOnError(api.CreateROCMProviderOptions(&options));
       sessionOptions.AppendExecutionProvider_ROCM(*options);
       api.ReleaseROCMProviderOptions(options);
+      g_info("onnxruntime_subplugin::setAccelerator has_rocm");
     } else if (has_openvino) {
       sessionOptions = Ort::SessionOptions();
       sessionOptions.AppendExecutionProvider("OpenVINO");
+      g_info("onnxruntime_subplugin::setAccelerator openvino");
     } else {
       sessionOptions = Ort::SessionOptions();
+      g_info("onnxruntime_subplugin::setAccelerator NONE");
     }
   }
 }
