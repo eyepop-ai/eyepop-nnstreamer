@@ -3,6 +3,7 @@
 {
   name: "Default",
   dockerFile: "../../docker/Dockerfile.dev",
+  context: "../..",
 
   customizations : {
     // Configure JetBrains IDE-specific properties
@@ -23,5 +24,6 @@
     // Add additional features to your project using auto-completion.
   },
   // Comment out to connect as the root user.
-  remoteUser: "eyepop"
+  remoteUser: "eyepop",
+  containerUser: "eyepop"
 }
