@@ -755,17 +755,27 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
       convertElementDataType (
           static_cast<tensor_type> (prop->input_meta.info[i].type), element_data_type);
 
-      inputNode.tensor_datas.emplace_back(
-          std::unique_ptr<void, CudaMemoryDeleter>(
-              allocator.Alloc(input[i].size), CudaMemoryDeleter(&allocator)));
-      cudaMemcpy_(inputNode.tensor_datas.back().get(), input[i].data, input[i].size, cudaMemcpyHostToDevice_);
-      inputNode.tensors.emplace_back (Ort::Value::CreateTensor (
+      if (use_gpu && has_cuda) {
+        inputNode.tensor_datas.emplace_back(
+            std::unique_ptr<void, CudaMemoryDeleter>(
+                allocator.Alloc(input[i].size), CudaMemoryDeleter(&allocator)));
+        cudaMemcpy_(inputNode.tensor_datas.back().get(), input[i].data, input[i].size, cudaMemcpyHostToDevice_);
+        inputNode.tensors.emplace_back (Ort::Value::CreateTensor (
+            memInfo,
+            inputNode.tensor_datas.back().get(),
+            input[i].size,
+            shape.data(),
+            shape.size(),
+            element_data_type));
+      } else {
+        inputNode.tensors.emplace_back (Ort::Value::CreateTensor (
           memInfo,
-          inputNode.tensor_datas.back().get(),
+          input[i].data,
           input[i].size,
           shape.data(),
           shape.size(),
           element_data_type));
+      }
       ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
     }
   } else {
