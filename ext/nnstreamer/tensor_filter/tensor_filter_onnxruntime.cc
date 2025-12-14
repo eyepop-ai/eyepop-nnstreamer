@@ -354,6 +354,7 @@ int
 onnxruntime_subplugin::convertTensorType (ONNXTensorElementDataType _type, tensor_type &type)
 {
   switch (_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
       type = _NNS_INT8;
       break;
@@ -738,7 +739,6 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
     ioBinding.ClearBoundInputs();
     inputNode.count = prop->input_meta.num_tensors;
     for (i = 0; i < prop->input_meta.num_tensors; i++) {
-      auto element_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
       std::vector<int64_t> shape;
       /* revert order between onnxruntime <> nnstreamer dimensions */
       for (auto j = NNS_TENSOR_RANK_LIMIT-1; j >= 0 ; j--) {
@@ -752,8 +752,6 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
           continue;
         }
       }
-      convertElementDataType (
-          static_cast<tensor_type> (prop->input_meta.info[i].type), element_data_type);
 
       if (use_gpu && has_cuda) {
         inputNode.tensor_datas.emplace_back(
@@ -766,7 +764,7 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
             input[i].size,
             shape.data(),
             shape.size(),
-            element_data_type));
+            inputNode.types[i]));
       } else {
         inputNode.tensors.emplace_back (Ort::Value::CreateTensor (
           memInfo,
@@ -774,7 +772,7 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
           input[i].size,
           shape.data(),
           shape.size(),
-          element_data_type));
+          inputNode.types[i]));
       }
       ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
     }
