@@ -584,9 +584,11 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   /* Initialize output info */
   outputNode.count = 0;
   auto output_names = std::set<std::string>();
+  auto tensors_info = const_cast<GstTensorsInfo*>(&prop->output_meta);
   for (i = 0; i < prop->output_meta.num_tensors; i++) {
-    if (prop->output_meta.info[i].name) {
-      output_names.insert (prop->output_meta.info[i].name);
+    GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info(tensors_info, i);
+    if (tensor_info->name) {
+      output_names.insert (tensor_info->name);
     }
   }
   for (i = 0; i < num_outputs; i++) {
