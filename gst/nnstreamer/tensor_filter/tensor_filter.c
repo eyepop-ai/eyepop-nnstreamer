@@ -746,7 +746,11 @@ _gst_tensor_filter_transform_get_all_input_data (GstBaseTransform * trans,
     hsize = _gst_tensor_filter_convert_meta (trans_data, &prop->input_meta, i);
 
     trans_data->tensors[i].data = trans_data->info[i].data + hsize;
-    trans_data->tensors[i].size = trans_data->info[i].size - hsize;
+    if (trans_data->info[i].size >= hsize) {
+      trans_data->tensors[i].size = trans_data->info[i].size - hsize;
+    } else {
+      trans_data->tensors[i].size = trans_data->info[i].size;
+    }
   }
 
   return trans_data;
