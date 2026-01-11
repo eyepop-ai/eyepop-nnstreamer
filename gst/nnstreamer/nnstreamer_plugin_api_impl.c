@@ -32,7 +32,7 @@ static const gchar *gst_tensor_time_sync_mode_string[] = {
 
 #define NNS_TENSOR_EXTRA_MAGIC 0xf00dc0de
 
-/**
+/*
  * @brief Data structure to describe a "extra" tensor data.
  * This represents the information of the NNS_TENSOR_SIZE_LIMIT-th memory block for tensor stream.
  */
@@ -40,9 +40,11 @@ typedef struct
 {
   uint32_t magic;
   uint32_t version;
+  tensor_format format; /**< tensor stream type */
   uint32_t num_extra_tensors;
   uint64_t reserved;
   GstTensorInfo infos[NNS_TENSOR_SIZE_EXTRA_LIMIT];
+  gchar tensor_names[NNS_TENSOR_SIZE_EXTRA_LIMIT][NNS_EXTRA_TENSOR_NAME_LIMIT];
 } GstTensorExtraInfo;
 
 /**
@@ -73,9 +75,10 @@ gst_memory_map_is_extra_tensor (GstMapInfo * map)
  * @brief Initialize GstTensorExtraInfo structure with given @a memory.
  * @param[in/out] extra GstTensorExtraInfo to be initialized.
  * @param[in] reserved_size The memory size of extra memory block.
+ * @param format
  */
 static void
-gst_tensor_extra_info_init (GstTensorExtraInfo * extra, gsize reserved_size)
+gst_tensor_extra_info_init (GstTensorExtraInfo *extra, gsize reserved_size, tensor_format format)
 {
   guint i;
 
@@ -84,6 +87,7 @@ gst_tensor_extra_info_init (GstTensorExtraInfo * extra, gsize reserved_size)
   extra->magic = NNS_TENSOR_EXTRA_MAGIC;
   extra->version = 0;
   extra->num_extra_tensors = 0;
+  extra->format = format;
 
   /* set reserved size of NNS_TENSOR_SIZE_LIMIT-th memory */
   extra->reserved = reserved_size;
@@ -1609,9 +1613,11 @@ gst_tensor_buffer_get_nth_memory (GstBuffer * buffer, const guint index)
 {
   guint i, num_tensors;
   gsize offset;
+  gssize mem_size;
   GstMemory *extra_tensors_memory, *res_mem = NULL;
   GstMapInfo extra_tensors_map;
   GstTensorExtraInfo *extra_info;
+  GstTensorMetaInfo meta;
 
   if (!GST_IS_BUFFER (buffer)) {
     nns_loge ("Failed to parse GstBuffer (invalid input buffer).");
@@ -1656,21 +1662,27 @@ gst_tensor_buffer_get_nth_memory (GstBuffer * buffer, const guint index)
   /* If index is NNS_TENSOR_MEMORY_MAX - 1 */
   if (index == NNS_TENSOR_MEMORY_MAX - 1) {
     res_mem =
-        gst_memory_share (extra_tensors_memory, offset, extra_info->reserved);
+        gst_memory_share(extra_tensors_memory, offset, extra_info->reserved);
     goto done;
   }
 
   offset += extra_info->reserved;
 
+  gst_tensor_meta_info_init(&meta);
+
   for (i = 1; i <= index - NNS_TENSOR_MEMORY_MAX; ++i) {
-    offset += gst_tensor_info_get_size (&extra_info->infos[i - 1]);
+    offset += gst_tensor_info_get_size(&extra_info->infos[i - 1]);
+    if (extra_info->format == _NNS_TENSOR_FORMAT_FLEXIBLE) {
+      offset += gst_tensor_meta_info_get_header_size(&meta);
+    }
   }
 
+  mem_size = gst_tensor_info_get_size(&extra_info->infos[index - NNS_TENSOR_MEMORY_MAX]);
+  if (extra_info->format == _NNS_TENSOR_FORMAT_FLEXIBLE) {
+    mem_size += gst_tensor_meta_info_get_header_size(&meta);
+  }
   /* wrap it as GstMemory */
-  res_mem =
-      gst_memory_share (extra_tensors_memory, offset,
-      gst_tensor_info_get_size (&extra_info->infos[index -
-              NNS_TENSOR_MEMORY_MAX]));
+  res_mem = gst_memory_share(extra_tensors_memory, offset, mem_size);
 
 done:
   gst_memory_unmap (extra_tensors_memory, &extra_tensors_map);
@@ -1694,6 +1706,7 @@ gst_tensor_buffer_append_memory (GstBuffer * buffer, GstMemory * memory,
   GstMapInfo new_memory_map, last_memory_map, incoming_memory_map;
   GstTensorExtraInfo *extra_info;
   GstTensorMetaInfo meta;
+  tensor_format format;
   gboolean is_extra, is_static;
   gboolean appended = FALSE;
 
@@ -1727,6 +1740,8 @@ gst_tensor_buffer_append_memory (GstBuffer * buffer, GstMemory * memory,
     gst_buffer_append_memory (buffer, memory);
     return TRUE;
   }
+
+  format = is_static? _NNS_TENSOR_FORMAT_STATIC: _NNS_TENSOR_FORMAT_FLEXIBLE;
 
   /* given buffer has NNS_TENSOR_MEMORY_MAX memory blocks */
   last_memory = gst_buffer_peek_memory (buffer, num_mems - 1);
@@ -1773,7 +1788,7 @@ gst_tensor_buffer_append_memory (GstBuffer * buffer, GstMemory * memory,
 
   /* if the last_memory does not have proper header, append it */
   if (!is_extra) {
-    gst_tensor_extra_info_init (extra_info, last_mem_size);
+    gst_tensor_extra_info_init (extra_info, last_mem_size, format);
     offset = sizeof (GstTensorExtraInfo);
   } else {
     offset = 0;
@@ -1790,15 +1805,30 @@ gst_tensor_buffer_append_memory (GstBuffer * buffer, GstMemory * memory,
   /* Copy tensor info into extra. */
   if (is_static) {
     gst_tensor_info_copy (&extra_info->infos[new_mem_index], info);
-
     /**
      * Free the name string, cause it does not freed by gstreamer.
-     * @todo Make custom gst_allocator later?
+     * We keep a size limited name copy in the extra info struct.
      */
-    g_free (extra_info->infos[new_mem_index].name);
-    extra_info->infos[new_mem_index].name = NULL;
+    if (extra_info->infos[new_mem_index].name) {
+      if (g_strlcpy(extra_info->tensor_names[new_mem_index], extra_info->infos[new_mem_index].name, NNS_EXTRA_TENSOR_NAME_LIMIT) >= NNS_EXTRA_TENSOR_NAME_LIMIT) {
+        g_warning("tensor name '%s' too long, truncated", extra_info->infos[new_mem_index].name);
+      }
+      g_free (extra_info->infos[new_mem_index].name);
+      extra_info->infos[new_mem_index].name = extra_info->tensor_names[new_mem_index];
+    }
   } else {
-    gst_tensor_meta_info_convert (&meta, &extra_info->infos[new_mem_index]);
+    gst_tensor_meta_info_convert(&meta, &extra_info->infos[new_mem_index]);
+    if (info->name) {
+      /**
+       * Meta doesn't have names, but if the passed tesnor_config
+       * has a name, keep a size limited name copy in the extra info struct.
+       */
+      if (g_strlcpy(extra_info->tensor_names[new_mem_index], info->name, NNS_EXTRA_TENSOR_NAME_LIMIT) >= NNS_EXTRA_TENSOR_NAME_LIMIT) {
+        g_warning("tensor name '%s' too long, truncated", info->name);
+      }
+      g_free (extra_info->infos[new_mem_index].name);
+      extra_info->infos[new_mem_index].name = extra_info->tensor_names[new_mem_index];
+    }
   }
 
   memcpy (new_memory_map.data + offset + last_memory_map.size,
