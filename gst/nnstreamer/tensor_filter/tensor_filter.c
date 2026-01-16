@@ -746,7 +746,11 @@ _gst_tensor_filter_transform_get_all_input_data (GstBaseTransform * trans,
     hsize = _gst_tensor_filter_convert_meta (trans_data, &prop->input_meta, i);
 
     trans_data->tensors[i].data = trans_data->info[i].data + hsize;
-    trans_data->tensors[i].size = trans_data->info[i].size - hsize;
+    if (trans_data->info[i].size >= hsize) {
+      trans_data->tensors[i].size = trans_data->info[i].size - hsize;
+    } else {
+      trans_data->tensors[i].size = trans_data->info[i].size;
+    }
   }
 
   return trans_data;
@@ -773,7 +777,7 @@ _gst_tensor_filter_transform_get_invoke_tensors (GstBaseTransform * trans,
     if (trans_data->num_tensors != prop->input_meta.num_tensors) {
       ml_loge_stacktrace
           ("gst_tensor_filter_transform: Input buffer has invalid number of memory blocks (%u), which is expected to be %u (the number of tensors). Maybe, the pad capability is not consistent with the actual input stream.\n",
-          prop->input_meta.num_tensors, prop->input_meta.num_tensors);
+          trans_data->num_tensors, prop->input_meta.num_tensors);
       return NULL;
     }
     invoke_num_tensors = trans_data->num_tensors;
