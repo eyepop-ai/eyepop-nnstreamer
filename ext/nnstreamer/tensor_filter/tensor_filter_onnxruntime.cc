@@ -354,6 +354,7 @@ int
 onnxruntime_subplugin::convertTensorType (ONNXTensorElementDataType _type, tensor_type &type)
 {
   switch (_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
       type = _NNS_INT8;
       break;
@@ -583,9 +584,11 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   /* Initialize output info */
   outputNode.count = 0;
   auto output_names = std::set<std::string>();
+  auto tensors_info = const_cast<GstTensorsInfo*>(&prop->output_meta);
   for (i = 0; i < prop->output_meta.num_tensors; i++) {
-    if (prop->output_meta.info[i].name) {
-      output_names.insert (prop->output_meta.info[i].name);
+    GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info(tensors_info, i);
+    if (tensor_info->name) {
+      output_names.insert (tensor_info->name);
     }
   }
   for (i = 0; i < num_outputs; i++) {
@@ -738,22 +741,18 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
     ioBinding.ClearBoundInputs();
     inputNode.count = prop->input_meta.num_tensors;
     for (i = 0; i < prop->input_meta.num_tensors; i++) {
-      auto element_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
       std::vector<int64_t> shape;
+      GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info(&prop->input_meta, i);
       /* revert order between onnxruntime <> nnstreamer dimensions */
       for (auto j = NNS_TENSOR_RANK_LIMIT-1; j >= 0 ; j--) {
-        if (prop->input_meta.info[i].dimension[j] > 0) {
-          if (prop->input_meta.info[i].dimension[j] == NNS_DIMENSION_ZERO_SIZE) {
+        if (tensor_info->dimension[j] > 0) {
+          if (tensor_info->dimension[j] == NNS_DIMENSION_ZERO_SIZE) {
             shape.push_back(0);
           } else {
-            shape.push_back (prop->input_meta.info[i].dimension[j]);
+            shape.push_back(tensor_info->dimension[j]);
           }
-        } else {
-          continue;
         }
       }
-      convertElementDataType (
-          static_cast<tensor_type> (prop->input_meta.info[i].type), element_data_type);
 
       if (use_gpu && has_cuda) {
         inputNode.tensor_datas.emplace_back(
@@ -766,7 +765,7 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
             input[i].size,
             shape.data(),
             shape.size(),
-            element_data_type));
+            inputNode.types[i]));
       } else {
         inputNode.tensors.emplace_back (Ort::Value::CreateTensor (
           memInfo,
@@ -774,7 +773,7 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
           input[i].size,
           shape.data(),
           shape.size(),
-          element_data_type));
+          inputNode.types[i]));
       }
       ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
     }
@@ -836,7 +835,8 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
     for (i = 0; i < outputTensors.size(); i++) {
       size_t scalar_count = 1;
       auto outputInfo = outputTensors[i].GetTensorTypeAndShapeInfo();
-      if (convertTensorType (outputInfo.GetElementType(), prop->output_meta.info[i].type) != 0) {
+      GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info(&prop->output_meta, i);
+      if (convertTensorType(outputInfo.GetElementType(), tensor_info->type) != 0) {
         throw std::runtime_error ("Failed to convert ONNX data type.");
       }
       /* revert order between onnxruntime <> nnstreamer dimensions */
@@ -844,13 +844,13 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
       for (unsigned int shapeI = rank; shapeI > 0 ; shapeI--) {
         auto dim = outputInfo.GetShape()[shapeI - 1];
         if (dim == 0) {
-          prop->output_meta.info[i].dimension[rank - shapeI] = NNS_DIMENSION_ZERO_SIZE;
+          tensor_info->dimension[rank - shapeI] = NNS_DIMENSION_ZERO_SIZE;
         } else {
-          prop->output_meta.info[i].dimension[rank - shapeI] = dim;
+          tensor_info->dimension[rank - shapeI] = dim;
         }
         scalar_count *= dim;
       }
-      output[i].size = scalar_count * gst_tensor_get_element_size(prop->output_meta.info[i].type);
+      output[i].size = scalar_count * gst_tensor_get_element_size(tensor_info->type);
       if (use_gpu & has_cuda) {
         output[i].data = g_malloc(output[i].size);
         cudaMemcpy_(output[i].data, outputTensors[i].GetTensorRawData(), output[i].size, cudaMemcpyDeviceToHost_);

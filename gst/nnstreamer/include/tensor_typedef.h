@@ -301,6 +301,8 @@ typedef struct
   uint32_t nnz; /**< the number of "non-zero" elements */
 } GstSparseTensorInfo;
 
+#define NNS_EXTRA_TENSOR_NAME_LIMIT 32
+
 /**
  * @brief Data structure to describe a tensor data.
  * This represents the basic information of a memory block for tensor stream.

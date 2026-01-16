@@ -1580,9 +1580,13 @@ gboolean
 gst_tensor_meta_info_convert (GstTensorMetaInfo * meta, GstTensorInfo * info)
 {
   guint i;
-
+  gboolean ret;
   g_return_val_if_fail (info != NULL, FALSE);
-  g_return_val_if_fail (gst_tensor_meta_info_validate (meta), FALSE);
+  ret = gst_tensor_meta_info_validate (meta);
+  if (!ret) {
+    g_return_val_if_fail (ret, FALSE);
+  }
+
 
   gst_tensor_info_init (info);
 
