@@ -322,19 +322,24 @@ onnxruntime_subplugin::convertTensorDim (std::vector<int64_t> &shapes, tensor_di
   size_t i, rank;
   is_dynamic = false;
   rank = shapes.size ();
-  if (rank <= 0 || rank > NNS_TENSOR_RANK_LIMIT) {
+  if (rank > NNS_TENSOR_RANK_LIMIT) {
     nns_loge("Invalid shape (rank %zu, max: %d)", rank, NNS_TENSOR_RANK_LIMIT);
     return -EINVAL;
   }
-
-  /* the order of dimension is reversed at CAPS negotiation */
-  for (i = 0; i < rank; i++) {
-    /* free dimensions are treated as 1 if not overridden */
-    if (shapes[rank - i - 1] < 0) {
-      is_dynamic = true;
-      dim[i] = 1;
-    } else {
-      dim[i] = shapes[rank - i - 1];
+  if (rank == 0) {
+    // scalar value, simulate with shape [1]
+    rank = 1;
+    dim[0] = 1;
+  } else {
+    /* the order of dimension is reversed at CAPS negotiation */
+    for (i = 0; i < rank; i++) {
+      /* free dimensions are treated as 1 if not overridden */
+      if (shapes[rank - i - 1] < 0) {
+        is_dynamic = true;
+        dim[i] = 1;
+      } else {
+        dim[i] = shapes[rank - i - 1];
+      }
     }
   }
 
@@ -894,7 +899,7 @@ onnxruntime_subplugin::getFrameworkInfo (GstTensorFilterFrameworkInfo &info)
   }
 }
 
-/**
+/**getInputDimension
  * @brief Method to get the model information.
  */
 int

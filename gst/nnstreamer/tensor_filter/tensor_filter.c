@@ -1058,11 +1058,15 @@ _gst_tensor_filter_transform_update_outbuf (GstBaseTransform * trans,
       meta.media_type = _NNS_TENSOR;
       meta.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
 
-      flex_mem = gst_memory_new_wrapped (0,
-          out_trans_data->tensors[i].data, out_trans_data->tensors[i].size, 0,
-          out_trans_data->tensors[i].size, out_trans_data->tensors[i].data,
-          g_free);
-
+      if (out_trans_data->tensors[i].size > 0) {
+        flex_mem = gst_memory_new_wrapped (0,
+            out_trans_data->tensors[i].data, out_trans_data->tensors[i].size, 0,
+            out_trans_data->tensors[i].size, out_trans_data->tensors[i].data,
+            g_free);
+      } else {
+        // support empty tensors
+        flex_mem = gst_allocator_alloc (NULL, 0, NULL);
+      }
       out_trans_data->mem[i] =
           gst_tensor_meta_info_append_header (&meta, flex_mem);
       gst_memory_unref (flex_mem);
