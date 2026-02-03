@@ -151,6 +151,8 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   bool configured;
   ORTCHAR_T *model_path; /**< The model *.onnx file */
 
+  const GstTensorFilterProperties *filter_props;
+
   Ort::SessionOptions sessionOptions;
   Ort::SessionOptions fallbackSessionOptions;
 
@@ -186,7 +188,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   void setAccelerator (const char *accelerators, bool invoke_dynamic);
   void invokeDynamic (GstTensorFilterProperties *prop,
       const GstTensorMemory *input, GstTensorMemory *output);
-  void configureSession (const GstTensorFilterProperties *prop, bool force_fallback);
+  void configureSession (bool force_fallback);
 
 
   public:
@@ -212,6 +214,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
  */
 onnxruntime_subplugin::onnxruntime_subplugin ()
     : configured{ false }, model_path{ nullptr },
+      filter_props{ nullptr },
       sessionOptions{ nullptr },
       fallbackSessionOptions{ nullptr },
       env{ nullptr },
@@ -470,14 +473,18 @@ onnxruntime_subplugin::getEmptyInstance ()
 }
 
 void
-onnxruntime_subplugin::configureSession (const GstTensorFilterProperties *prop, bool force_fallback)
+onnxruntime_subplugin::configureSession (bool force_fallback)
 {
+  g_assert_nonnull (filter_props);
   size_t i, num_inputs, num_outputs;
   bool enable_cuda_graph = false;
 
+  /* Initialize input info */
+  clearNodeInfo (inputNode);
+  clearNodeInfo (outputNode);
+
+
   /* Read a model */
-  // use ORT_LOGGING_LEVEL_VERBOSE to debug ONNX/CUDA
-  env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
   try {
     if (force_fallback && fallbackSessionOptions) {
       session = Ort::Session (env, model_path, fallbackSessionOptions);
@@ -520,7 +527,6 @@ onnxruntime_subplugin::configureSession (const GstTensorFilterProperties *prop, 
         std::string ("Too many output tensors: ") + std::to_string (num_outputs)
         + std::string ("max: ") + NNS_TENSOR_SIZE_LIMIT_STR);
   }
-
   if (has_cuda && use_gpu) {
     memInfo = Ort::MemoryInfo ("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
     runOptions = Ort::RunOptions ();
@@ -537,12 +543,11 @@ onnxruntime_subplugin::configureSession (const GstTensorFilterProperties *prop, 
 
   allocator = Ort::Allocator (session, memInfo);
 
-  /* Initialize input info */
   Ort::AllocatorWithDefaultOptions namesAllocator;
   inputNode.count = 0;
 
   for (i = 0; i < num_inputs; i++) {
-    /* Get input name */
+  /* Get input name */
     auto input_name = session.GetInputNameAllocated (i, namesAllocator);
     inputNode.names_allocated_strings.push_back (std::move (input_name));
     inputNode.names.push_back (inputNode.names_allocated_strings.back ().get ());
@@ -558,8 +563,8 @@ onnxruntime_subplugin::configureSession (const GstTensorFilterProperties *prop, 
   /* Initialize output info */
   outputNode.count = 0;
   auto output_names = std::set<std::string> ();
-  auto tensors_info = const_cast<GstTensorsInfo *> (&prop->output_meta);
-  for (i = 0; i < prop->output_meta.num_tensors; i++) {
+  auto tensors_info = const_cast<GstTensorsInfo *> (&filter_props->output_meta);
+  for (i = 0; i < tensors_info->num_tensors; i++) {
     GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info (tensors_info, i);
     if (tensor_info->name) {
       output_names.insert (tensor_info->name);
@@ -601,11 +606,13 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
     }
     cleanup ();
   }
+  filter_props = prop;
+
   nns_logi("num_hw: %d acc string: %s", prop->num_hw, prop->accl_str);
   for (int j = 0; j < prop->num_hw; j++) {
     nns_logi("prop->hw_list[i]: %d", prop->hw_list[j]);
   }
-  bool is_invoke_dynamic = prop != nullptr && (
+  bool is_invoke_dynamic = filter_props != nullptr && (
                                prop->invoke_dynamic ||
                                prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC ||
                                prop->output_meta.format != _NNS_TENSOR_FORMAT_STATIC);
@@ -631,7 +638,10 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   model_path = g_strdup (prop->model_files[0]);
 #endif
 
-  configureSession (prop, false);
+  // use ORT_LOGGING_LEVEL_VERBOSE to debug ONNX/CUDA
+  env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
+
+  configureSession (false);
   configured = true;
 }
 
@@ -874,14 +884,20 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
     invokeDynamic(prop, input, output);
   } catch (const Ort::Exception &exception) {
     if (fallbackSessionOptions) {
+      g_info ("ONNX provider error '%s' for %s, trying to use fallback session options",
+          exception.what (), model_path);
       try {
-        configureSession (prop, true);
+        configureSession (true);
+        invokeDynamic(prop, input, output);
       } catch (const Ort::Exception &exception) {
         const std::string err_msg
             = "ERROR running model inference: " + (std::string) exception.what ();
         throw std::runtime_error (err_msg);
       }
     } else {
+      g_info ("ONNX provider error '%s' for %s, no fallback",
+        exception.what (), model_path);
+
       const std::string err_msg
           = "ERROR running model inference: " + (std::string) exception.what ();
       throw std::runtime_error (err_msg);
