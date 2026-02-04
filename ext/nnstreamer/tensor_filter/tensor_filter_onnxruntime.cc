@@ -129,7 +129,7 @@ struct CudaMemoryDeleter {
   const Ort::Allocator* alloc_;
 };
 
-static const gchar *onnx_accl_support[] = { ACCL_CPU_STR, ACCL_GPU_STR, nullptr };
+static const gchar *onnx_accl_support[] = { ACCL_CPU_STR, ACCL_GPU_STR, ACCL_NPU_STR, nullptr };
 
 /** @brief tensor-filter-subplugin concrete class for onnxruntime */
 class onnxruntime_subplugin final : public tensor_filter_subplugin
@@ -174,6 +174,12 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   accl_hw use_accelerator;
   bool use_gpu;
 
+  bool disable_cuda;
+  bool disable_cuda_graph;
+  bool disable_qnn;
+  bool disable_rocm;
+  bool disable_openvino;
+
   onnx_node_info_s inputNode;
   onnx_node_info_s outputNode;
 
@@ -189,6 +195,8 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   void invokeDynamic (GstTensorFilterProperties *prop,
       const GstTensorMemory *input, GstTensorMemory *output);
   void configureSession (bool force_fallback);
+
+  bool useCuda() { return use_gpu && has_cuda && !disable_cuda; }
 
 
   public:
@@ -227,7 +235,9 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_rocm{ false }, has_openvino{ false },
       has_accelerator{ ACCL_NONE },
       use_accelerator{ ACCL_NONE },
-      use_gpu{ false }
+      use_gpu{ false },
+      disable_cuda{ false }, disable_cuda_graph{ false },
+      disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false }
 {
   std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
   for (auto provider_name : availableProviders) {
@@ -491,7 +501,7 @@ onnxruntime_subplugin::configureSession (bool force_fallback)
       fallbackSessionOptions = Ort::SessionOptions( nullptr );
     } else {
       session = Ort::Session (env, model_path, sessionOptions);
-      enable_cuda_graph = true;
+      enable_cuda_graph = !disable_cuda_graph;
     }
   } catch (const Ort::Exception &exception) {
     if (fallbackSessionOptions) {
@@ -527,7 +537,7 @@ onnxruntime_subplugin::configureSession (bool force_fallback)
         std::string ("Too many output tensors: ") + std::to_string (num_outputs)
         + std::string ("max: ") + NNS_TENSOR_SIZE_LIMIT_STR);
   }
-  if (has_cuda && use_gpu) {
+  if (has_cuda && use_gpu && !disable_cuda) {
     memInfo = Ort::MemoryInfo ("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
     runOptions = Ort::RunOptions ();
     if (enable_cuda_graph) {
@@ -638,6 +648,25 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   model_path = g_strdup (prop->model_files[0]);
 #endif
 
+  g_info("\n\n\n custom for %s: %s\n\n\n", model_path, prop->custom_properties);
+  if (prop && prop->custom_properties) {
+    gchar** custom_properties = g_strsplit(prop->custom_properties, ";", 0);
+    for (int i = 0; custom_properties[i]; i++) {
+      if (strcmp(custom_properties[i], "disable_cuda") == 0) {
+        disable_cuda = true;
+      } else if (strcmp(custom_properties[i], "disable_cuda_graph") == 0) {
+        disable_cuda_graph = true;
+      } else if (strcmp(custom_properties[i], "disable_qnn") == 0) {
+        disable_qnn = true;
+      } else if (strcmp(custom_properties[i], "disable_rocm") == 0) {
+        disable_rocm = true;
+      } else if (strcmp(custom_properties[i], "disable_openvi") == 0) {
+        disable_openvino = true;
+      }
+    }
+    g_strfreev(custom_properties);
+  }
+
   // use ORT_LOGGING_LEVEL_VERBOSE to debug ONNX/CUDA
   env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
 
@@ -653,11 +682,19 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
 {
   use_gpu = TRUE;
   use_accelerator = parse_accl_hw (accelerators, onnx_accl_support, nullptr, nullptr);
-  if ((use_accelerator & (ACCL_CPU)) != 0) {
-    use_gpu = FALSE;
-  } else {
-    if (has_cuda) {
-      auto api = Ort::GetApi();
+  if (has_cuda && (use_accelerator & ACCL_GPU) && !disable_cuda) {
+    auto api = Ort::GetApi();
+    if (disable_cuda_graph) {
+      sessionOptions = Ort::SessionOptions();
+      OrtCUDAProviderOptionsV2* options = nullptr;
+      Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
+      std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search"};
+      std::vector<const char*> values{"0", "HEURISTIC"};
+      Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
+      sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
+      api.ReleaseCUDAProviderOptions(options);
+      g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on fallbackSessionOptions", keys.size());
+    } else {
       {
         sessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
@@ -680,32 +717,33 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         api.ReleaseCUDAProviderOptions(options);
         g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on fallbackSessionOptions", keys.size());
       }
-    } else if (has_qnn) {
-      sessionOptions = Ort::SessionOptions();
-#if (defined(_WIN32) || defined(__CYGWIN__))
-      std::unordered_map<std::string, std::string> provider_options;
-      provider_options["backend_path"] = "QnnHtp.dll";
-      sessionOptions.AppendExecutionProvider("QNN", provider_options);
-      g_info("onnxruntime_subplugin::setAccelerator qnn");
-#else
-      sessionOptions.AppendExecutionProvider("QNN");
-#endif
-    } else if (has_rocm) {
-      sessionOptions = Ort::SessionOptions();
-      auto api = Ort::GetApi();
-      OrtROCMProviderOptions* options = nullptr;
-      Ort::ThrowOnError(api.CreateROCMProviderOptions(&options));
-      sessionOptions.AppendExecutionProvider_ROCM(*options);
-      api.ReleaseROCMProviderOptions(options);
-      g_info("onnxruntime_subplugin::setAccelerator has_rocm");
-    } else if (has_openvino) {
-      sessionOptions = Ort::SessionOptions();
-      sessionOptions.AppendExecutionProvider("OpenVINO");
-      g_info("onnxruntime_subplugin::setAccelerator openvino");
-    } else {
-      sessionOptions = Ort::SessionOptions();
-      g_info("onnxruntime_subplugin::setAccelerator NONE");
     }
+  } else if (has_qnn && (use_accelerator & ACCL_NPU)) {
+    sessionOptions = Ort::SessionOptions();
+#if (defined(_WIN32) || defined(__CYGWIN__))
+    std::unordered_map<std::string, std::string> provider_options;
+    provider_options["backend_path"] = "QnnHtp.dll";
+    sessionOptions.AppendExecutionProvider("QNN", provider_options);
+    g_info("onnxruntime_subplugin::setAccelerator qnn");
+#else
+    sessionOptions.AppendExecutionProvider("QNN");
+#endif
+  } else if (has_rocm && (use_accelerator & ACCL_GPU)) {
+    sessionOptions = Ort::SessionOptions();
+    auto api = Ort::GetApi();
+    OrtROCMProviderOptions* options = nullptr;
+    Ort::ThrowOnError(api.CreateROCMProviderOptions(&options));
+    sessionOptions.AppendExecutionProvider_ROCM(*options);
+    api.ReleaseROCMProviderOptions(options);
+    g_info("onnxruntime_subplugin::setAccelerator has_rocm");
+  } else if (has_openvino && (use_accelerator & ACCL_GPU)) {
+    sessionOptions = Ort::SessionOptions();
+    sessionOptions.AppendExecutionProvider("OpenVINO");
+    g_info("onnxruntime_subplugin::setAccelerator openvino");
+  } else {
+    use_gpu = FALSE;
+    sessionOptions = Ort::SessionOptions();
+    g_info("onnxruntime_subplugin::setAccelerator NONE");
   }
 }
 
@@ -717,7 +755,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
 
   if (prop == nullptr || prop->input_meta.format == _NNS_TENSOR_FORMAT_STATIC) {
     /* Set input to tensor */
-    if (use_gpu && has_cuda) {
+    if (useCuda()) {
       if (inputNode.tensors.size () != inputNode.count) {
         for (i = 0; i < inputNode.count; ++i) {
           auto shape = inputNode.shapes[i].data ();
@@ -767,7 +805,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
         }
       }
 
-      if (use_gpu && has_cuda) {
+      if (useCuda()) {
         inputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
             allocator.Alloc (input[i].size), CudaMemoryDeleter (&allocator)));
         cudaMemcpy_ (inputNode.tensor_datas.back ().get (), input[i].data,
@@ -794,7 +832,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
   if (prop == nullptr
       || (prop->input_meta.format == _NNS_TENSOR_FORMAT_STATIC && !prop->invoke_dynamic)) {
     /* Set input to tensor */
-    if (use_gpu && has_cuda) {
+    if (useCuda()) {
       if (outputNode.tensors.size () != outputNode.count) {
         for (i = 0; i < outputNode.count; ++i) {
           outputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
@@ -850,7 +888,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
         scalar_count *= dim;
       }
       output[i].size = scalar_count * gst_tensor_get_element_size (tensor_info->type);
-      if (use_gpu & has_cuda) {
+      if (use_gpu & has_cuda && !disable_cuda) {
         output[i].data = g_malloc (output[i].size);
         cudaMemcpy_ (output[i].data, outputTensors[i].GetTensorRawData (),
             output[i].size, cudaMemcpyDeviceToHost_);
@@ -859,7 +897,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
             = g_memdup2 (outputTensors[i].GetTensorRawData (), output[i].size);
       }
     }
-  } else if (use_gpu && has_cuda) {
+  } else if (useCuda()) {
     for (i = 0; i < outputNode.tensors.size (); i++) {
       cudaMemcpy_ (output[i].data, outputNode.tensor_datas[i].get (),
           output[i].size, cudaMemcpyDeviceToHost_);
