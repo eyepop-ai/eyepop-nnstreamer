@@ -648,7 +648,6 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   model_path = g_strdup (prop->model_files[0]);
 #endif
 
-  g_info("\n\n\n custom for %s: %s\n\n\n", model_path, prop->custom_properties);
   if (prop && prop->custom_properties) {
     gchar** custom_properties = g_strsplit(prop->custom_properties, ";", 0);
     for (int i = 0; custom_properties[i]; i++) {
@@ -836,7 +835,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
       if (outputNode.tensors.size () != outputNode.count) {
         for (i = 0; i < outputNode.count; ++i) {
           outputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
-              allocator.Alloc (output->size), CudaMemoryDeleter (&allocator)));
+              allocator.Alloc (output[i].size), CudaMemoryDeleter (&allocator)));
           // Create an OrtValue tensor backed by data on CUDA memory
           outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
               outputNode.tensor_datas.back ().get (), output[i].size,
