@@ -851,7 +851,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
     ioBinding.ClearBoundOutputs();
     outputNode.tensors.clear();
     outputNode.tensor_datas.clear();
-    g_warning("invokeDynamic FLEXIBLE OUTPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path, useCuda(), outputNode.tensors.size (),  outputNode.count);
+    // g_warning("invokeDynamic FLEXIBLE OUTPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path, useCuda(), outputNode.tensors.size (),  outputNode.count);
     for (i = 0; i < outputNode.count; ++i) {
       ioBinding.BindOutput(outputNode.names[i], memInfo);
     }
@@ -861,7 +861,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
 
   /* free input tensors asap - keep only when we want to keep static CUDA memory around for the next invocation */
    if (!useCuda() || (prop != nullptr && prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC)) {
-    g_warning("invokeDynamic CLEAR INPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path,  useCuda(), inputNode.tensors.size (),  inputNode.count);
+    // g_warning("invokeDynamic CLEAR INPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path,  useCuda(), inputNode.tensors.size (),  inputNode.count);
     ioBinding.ClearBoundInputs();
     inputNode.tensors.clear();
     inputNode.tensor_datas.clear();
