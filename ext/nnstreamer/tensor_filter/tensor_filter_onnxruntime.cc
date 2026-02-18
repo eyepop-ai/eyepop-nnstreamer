@@ -94,34 +94,15 @@ static void init_cudaMemcpy() {
   cudaMemcpy_initialized = TRUE;
 }
 
-struct CudaMemoryBlock {
-  CudaMemoryBlock(size_t size)
-      : block_size{ size }, device_ptr{} {
-    int cuda_ret = cudaMalloc_(&device_ptr, size);
-    if (cuda_ret > 0) {
-      g_warning("Failed to allocate %lu bytes of CUDA memory: %d", size, cuda_ret);
-    }
-  }
-  virtual ~CudaMemoryBlock() {
-    int cuda_ret = cudaFree_(device_ptr);
-    if (cuda_ret > 0) {
-      g_warning("Failed to free CUDA memory: %d", cuda_ret);
-    }
-  };
-  inline size_t size() const {
-    return block_size;
-  }
-  inline void*buffer () const {
-    return device_ptr;
-  }
-  private:
-  const size_t block_size;
-  void* device_ptr;
-};
-
 struct CudaMemoryDeleter {
-  explicit CudaMemoryDeleter(const Ort::Allocator* alloc) {
+  explicit CudaMemoryDeleter(const Ort::Allocator* alloc) noexcept {
     alloc_ = alloc;
+  }
+  CudaMemoryDeleter(const CudaMemoryDeleter& other) noexcept {
+    alloc_ = other.alloc_;
+  }
+  CudaMemoryDeleter(CudaMemoryDeleter&& other) noexcept {
+    alloc_ = other.alloc_;
   }
   void operator()(void* ptr) const {
     ((Ort::Allocator*)alloc_)->Free(ptr);
@@ -756,18 +737,21 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
     /* Set input to tensor */
     if (useCuda()) {
       if (inputNode.tensors.size () != inputNode.count) {
+        ioBinding.ClearBoundInputs();
+        inputNode.tensors.clear();
+        inputNode.tensor_datas.clear();
         for (i = 0; i < inputNode.count; ++i) {
           auto shape = inputNode.shapes[i].data ();
           auto shape_size = inputNode.shapes[i].size ();
-          inputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
-              allocator.Alloc (input[i].size), CudaMemoryDeleter (&allocator)));
-          cudaMemcpy_ (inputNode.tensor_datas.back ().get (), input[i].data,
+          inputNode.tensor_datas.emplace_back(std::unique_ptr<void, CudaMemoryDeleter>(
+              allocator.Alloc(input[i].size), CudaMemoryDeleter(&allocator)));
+          cudaMemcpy_(inputNode.tensor_datas.back ().get (), input[i].data,
               input[i].size, cudaMemcpyHostToDevice_);
           // Create an OrtValue tensor backed by data on CUDA memory
-          inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
+          inputNode.tensors.emplace_back(Ort::Value::CreateTensor (memInfo,
               inputNode.tensor_datas.back ().get (), input[i].size, shape,
               shape_size, inputNode.types[i]));
-          ioBinding.BindInput (inputNode.names[i], inputNode.tensors.back ());
+          ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
         }
       } else {
         for (i = 0; i < inputNode.count; ++i) {
@@ -776,8 +760,9 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
         }
       }
     } else {
-      inputNode.tensors.clear ();
-      ioBinding.ClearBoundInputs ();
+      ioBinding.ClearBoundInputs();
+      inputNode.tensors.clear();
+      inputNode.tensor_datas.clear();
       for (i = 0; i < inputNode.count; ++i) {
         auto shape = inputNode.shapes[i].data ();
         auto shape_size = inputNode.shapes[i].size ();
@@ -787,37 +772,38 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
       }
     }
   } else if (prop->input_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE) {
-    inputNode.tensors.clear ();
-    ioBinding.ClearBoundInputs ();
+    ioBinding.ClearBoundInputs();
+    inputNode.tensors.clear();
+    inputNode.tensor_datas.clear();
     inputNode.count = prop->input_meta.num_tensors;
     for (i = 0; i < prop->input_meta.num_tensors; i++) {
       std::vector<int64_t> shape;
-      GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info (&prop->input_meta, i);
+      GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info(&prop->input_meta, i);
       /* revert order between onnxruntime <> nnstreamer dimensions */
       for (auto j = NNS_TENSOR_RANK_LIMIT - 1; j >= 0; j--) {
         if (tensor_info->dimension[j] > 0) {
           if (tensor_info->dimension[j] == NNS_DIMENSION_ZERO_SIZE) {
-            shape.push_back (0);
+            shape.push_back(0);
           } else {
-            shape.push_back (tensor_info->dimension[j]);
+            shape.push_back(tensor_info->dimension[j]);
           }
         }
       }
 
       if (useCuda()) {
         inputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
-            allocator.Alloc (input[i].size), CudaMemoryDeleter (&allocator)));
-        cudaMemcpy_ (inputNode.tensor_datas.back ().get (), input[i].data,
+            allocator.Alloc(input[i].size), CudaMemoryDeleter(&allocator)));
+        cudaMemcpy_(inputNode.tensor_datas.back ().get (), input[i].data,
             input[i].size, cudaMemcpyHostToDevice_);
         inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
             inputNode.tensor_datas.back ().get (), input[i].size, shape.data (),
             shape.size (), inputNode.types[i]));
       } else {
-        inputNode.tensors.emplace_back (
+        inputNode.tensors.emplace_back(
             Ort::Value::CreateTensor (memInfo, input[i].data, input[i].size,
                 shape.data (), shape.size (), inputNode.types[i]));
       }
-      ioBinding.BindInput (inputNode.names[i], inputNode.tensors.back ());
+      ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
     }
   } else {
     const std::string err_msg
@@ -829,42 +815,57 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
   /* Set output to tensor */
 
   if (prop == nullptr
-      || (prop->input_meta.format == _NNS_TENSOR_FORMAT_STATIC && !prop->invoke_dynamic)) {
-    /* Set input to tensor */
+      || (prop->output_meta.format == _NNS_TENSOR_FORMAT_STATIC && !prop->invoke_dynamic)) {
+    /* Set output to tensor */
     if (useCuda()) {
       if (outputNode.tensors.size () != outputNode.count) {
+        ioBinding.ClearBoundOutputs();
+        outputNode.tensors.clear();
+        outputNode.tensor_datas.clear();
         for (i = 0; i < outputNode.count; ++i) {
-          outputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
-              allocator.Alloc (output[i].size), CudaMemoryDeleter (&allocator)));
+          outputNode.tensor_datas.emplace_back(std::unique_ptr<void, CudaMemoryDeleter> (
+              allocator.Alloc (output[i].size), CudaMemoryDeleter(&allocator)));
           // Create an OrtValue tensor backed by data on CUDA memory
           outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
               outputNode.tensor_datas.back ().get (), output[i].size,
               outputNode.shapes[i].data (), outputNode.shapes[i].size (),
               outputNode.types[i]));
-          ioBinding.BindOutput (outputNode.names[i], outputNode.tensors.back ());
+          ioBinding.BindOutput(outputNode.names[i], outputNode.tensors.back ());
         }
       }
     } else {
-      outputNode.tensors.clear ();
-      ioBinding.ClearBoundOutputs ();
+      ioBinding.ClearBoundOutputs();
+      outputNode.tensors.clear();
+      outputNode.tensor_datas.clear();
       for (i = 0; i < outputNode.count; ++i) {
         outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
             output[i].data, output[i].size, outputNode.shapes[i].data (),
             outputNode.shapes[i].size (), outputNode.types[i]));
-        ioBinding.BindOutput (outputNode.names[i], outputNode.tensors.back ());
+        ioBinding.BindOutput(outputNode.names[i], outputNode.tensors.back ());
       }
     }
   } else {
+    ioBinding.ClearBoundOutputs();
+    outputNode.tensors.clear();
+    outputNode.tensor_datas.clear();
     for (i = 0; i < outputNode.count; ++i) {
-      ioBinding.BindOutput (outputNode.names[i], memInfo);
+      ioBinding.BindOutput(outputNode.names[i], memInfo);
     }
   }
   /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
-  session.Run (runOptions, ioBinding);
+  session.Run(runOptions, ioBinding);
+
+  /* free input tensors asap - keep only when we want to keep static CUDA memory around for the next invocation */
+  if (!useCuda() || (prop != nullptr && prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC)) {
+    ioBinding.ClearBoundInputs();
+    inputNode.tensors.clear();
+    inputNode.tensor_datas.clear();
+  }
+
   if (prop != nullptr
       && (prop->output_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE || prop->invoke_dynamic)) {
     gst_tensors_info_init (&prop->output_meta);
-    auto outputTensors = ioBinding.GetOutputValues ();
+    auto outputTensors = ioBinding.GetOutputValues();
     prop->output_meta.num_tensors = outputTensors.size ();
     prop->output_meta.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
 
@@ -889,18 +890,27 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
       output[i].size = scalar_count * gst_tensor_get_element_size (tensor_info->type);
       if (use_gpu & has_cuda && !disable_cuda) {
         output[i].data = g_malloc (output[i].size);
-        cudaMemcpy_ (output[i].data, outputTensors[i].GetTensorRawData (),
+        cudaMemcpy_(output[i].data, outputTensors[i].GetTensorRawData (),
             output[i].size, cudaMemcpyDeviceToHost_);
       } else {
-        output[i].data
-            = g_memdup2 (outputTensors[i].GetTensorRawData (), output[i].size);
+        output[i].data = g_memdup2(outputTensors[i].GetTensorRawData(), output[i].size);
       }
     }
+    /* free output tensors finally if dynamic output structure */
+    ioBinding.ClearBoundInputs();
+    inputNode.tensors.clear();
+    inputNode.tensor_datas.clear();
+
   } else if (useCuda()) {
     for (i = 0; i < outputNode.tensors.size (); i++) {
-      cudaMemcpy_ (output[i].data, outputNode.tensor_datas[i].get (),
+      cudaMemcpy_(output[i].data, outputNode.tensor_datas[i].get (),
           output[i].size, cudaMemcpyDeviceToHost_);
     }
+  } else {
+    /* free output tensors finally if static output structure and NO cuda */
+    ioBinding.ClearBoundInputs();
+    inputNode.tensors.clear();
+    inputNode.tensor_datas.clear();
   }
 }
 /**
