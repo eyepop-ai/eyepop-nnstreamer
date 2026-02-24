@@ -767,6 +767,7 @@ TFLiteInterpreter::setTensorProp (
       return -1;
     }
     info->type = getTensorType (interpreter->tensor (idx)->type);
+    g_free(info->name);
     info->name = g_strdup (interpreter->tensor (idx)->name);
 
 #if (DBG)

@@ -302,7 +302,7 @@ onnxruntime_subplugin::convertTensorInfo (onnx_node_info_s &node, GstTensorsInfo
 
     if (convertTensorDim (node.shapes[i], _info->dimension, is_dynamic) != 0)
       throw std::runtime_error ("Failed to convert ONNX shape.");
-
+    g_free(_info->name);
     _info->name = g_strdup (node.names[i]);
     if (is_dynamic) {
       info.format = _NNS_TENSOR_FORMAT_FLEXIBLE;
