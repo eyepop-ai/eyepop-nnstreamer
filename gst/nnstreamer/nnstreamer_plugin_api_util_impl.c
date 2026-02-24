@@ -637,16 +637,18 @@ gst_tensors_info_parse_names_string (GstTensorsInfo * info,
 
     for (i = 0; i < num_names; i++) {
       gchar *str_name;
-
+      gchar *name_dup;
       _info = gst_tensors_info_get_nth_info (info, i);
       g_free (_info->name);
       _info->name = NULL;
 
-      str_name = g_strstrip (g_strdup (str_names[i]));
-      if (str_name && strlen (str_name))
-        _info->name = str_name;
-      else
-        g_free (str_name);
+      name_dup = g_strdup (str_names[i]);
+      str_name = g_strstrip (name_dup);
+      if (str_name && strlen (str_name)) {
+        g_free(_info->name);
+        _info->name = g_strdup (str_name);
+      }
+      g_free (name_dup);
     }
 
     g_strfreev (str_names);
