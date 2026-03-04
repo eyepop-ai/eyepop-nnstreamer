@@ -20,6 +20,8 @@
 
 #include <set>
 #include <string>
+#include <chrono>
+#include <optional>
 
 #include <glib.h>
 #include <gmodule.h>
@@ -29,6 +31,7 @@
 #include <nnstreamer_util.h>
 
 #define ORT_API_MANUAL_INIT 1
+
 #ifdef G_LOG_DOMAIN
 #undef G_LOG_DOMAIN
 #endif
@@ -45,6 +48,25 @@ void init_filter_onnxruntime (void) __attribute__ ((constructor));
 void fini_filter_onnxruntime (void) __attribute__ ((destructor));
 }
 
+// #define DEBUG_TIMING 1
+
+#ifdef DEBUG_TIMING
+template<typename TimeDuration = std::chrono::nanoseconds, typename F>
+auto timeIt(const F &func, TimeDuration &duration, std::optional<int*> count = std::nullopt) {
+  auto start = std::chrono::high_resolution_clock::now();
+  auto result = func();
+  auto end = std::chrono::high_resolution_clock::now();
+  duration += end - start;
+  if (count.has_value()) {
+    *(count.value()) += 1;
+  }
+  return result;
+}
+#define TIME_IT(f, t) timeIt(f, t)
+#else
+#define TIME_IT(f, t) f()
+#endif
+
 typedef enum
 {
   cudaMemcpyHostToHost_          =   0,      /**< Host   -> Host */
@@ -54,17 +76,36 @@ typedef enum
   cudaMemcpyDefault_             =   4       /**< Direction of the transfer is inferred from the pointer values. Requires unified virtual addressing */
 } cudaMemcpyKind_;
 
+#define cudaStreamDefault_ 0x00
+#define cudaStreamNonBlocking_ 0x01
+
+typedef struct CUstream_st_ * cudaStream_t_;
+
 typedef int (*cudaMalloc_t)(void **p, size_t s);
 typedef int (*cudaFree_t)(void *devPtr);
 typedef int (*cudaMemcpy_t) (
-    void * dst,
-    const void * src,
-    size_t count,
-    cudaMemcpyKind_ kind);
+  void * dst,
+  const void * src,
+  size_t count,
+  cudaMemcpyKind_ kind);
+typedef int (*cudaMemcpyAsync_t) (
+  void* dst,
+  const void* src,
+  size_t count,
+  cudaMemcpyKind_ kind,
+  cudaStream_t_ stream);
+typedef int (*cudaStreamCreateWithFlags_t) ( cudaStream_t_* pStream, unsigned int  flags );
+typedef int (*cudaStreamDestroy_t) ( cudaStream_t_ stream );
+typedef int (*cudaStreamSynchronize_t) ( cudaStream_t_ stream );
 
 static cudaMalloc_t cudaMalloc_ = nullptr;
 static cudaFree_t cudaFree_ = nullptr;
 static cudaMemcpy_t cudaMemcpy_ = nullptr;
+static cudaMemcpyAsync_t cudaMemcpyAsync_ = nullptr;
+static cudaStreamCreateWithFlags_t cudaStreamCreateWithFlags_ = nullptr;
+static cudaStreamDestroy_t cudaStreamDestroy_ = nullptr;
+static cudaStreamSynchronize_t cudaStreamSynchronize_ = nullptr;
+
 static gboolean cudaMemcpy_initialized = FALSE;
 
 static void init_cudaMemcpy() {
@@ -89,6 +130,30 @@ static void init_cudaMemcpy() {
               reinterpret_cast<gpointer *> (&cudaMemcpy_))) {
         g_warning("g_module_symbol( ... \"cudaMemcpy\" ...) NOT FOUND");
       }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaMemcpyAsync",
+              reinterpret_cast<gpointer *> (&cudaMemcpyAsync_))) {
+        g_warning("g_module_symbol( ... \"cudaMemcpyAsync\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+          cuda_module,
+          "cudaStreamCreateWithFlags",
+          reinterpret_cast<gpointer *> (&cudaStreamCreateWithFlags_))) {
+        g_warning("g_module_symbol( ... \"cudaStreamCreateWithFlags_\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaStreamDestroy",
+              reinterpret_cast<gpointer *> (&cudaStreamDestroy_))) {
+        g_warning("g_module_symbol( ... \"cudaStreamDestroy\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaStreamSynchronize",
+              reinterpret_cast<gpointer *> (&cudaStreamSynchronize_))) {
+        g_warning("g_module_symbol( ... \"cudaStreamSynchronize\" ...) NOT FOUND");
+              }
     }
   }
   cudaMemcpy_initialized = TRUE;
@@ -173,12 +238,17 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   int convertTensorDim (std::vector<int64_t> &shapes, tensor_dim &dim, bool &is_dynamic);
   int convertTensorType (ONNXTensorElementDataType _type, tensor_type &type);
   void setAccelerator (const char *accelerators, bool invoke_dynamic);
+  void prepareInput (const GstTensorMemory *input, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time);
+  void prepareOutput (GstTensorMemory *output, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time);
+  void postProcessInput (GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time);
+  void postProcessOutput (GstTensorMemory *output, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time);
   void invokeDynamic (GstTensorFilterProperties *prop,
       const GstTensorMemory *input, GstTensorMemory *output);
   void configureSession (bool force_fallback);
 
   bool useCuda() { return use_gpu && has_cuda && !disable_cuda; }
 
+  cudaStream_t_ cudaStream;
 
   public:
   static void init_filter_onnxruntime ();
@@ -197,6 +267,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   int eventHandler (event_ops ops, GstTensorFilterFrameworkEventData &data);
   int convertElementDataType (tensor_type type, ONNXTensorElementDataType &_type);
 };
+
 
 /**
  * @brief Constructor for onnxruntime_subplugin.
@@ -218,7 +289,8 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       use_accelerator{ ACCL_NONE },
       use_gpu{ false },
       disable_cuda{ false }, disable_cuda_graph{ false },
-      disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false }
+      disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false },
+      cudaStream{ nullptr }
 {
   std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
   for (auto provider_name : availableProviders) {
@@ -233,6 +305,7 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_openvino = true;
     }
   }
+
   nns_logi("onnxruntime provider: cuda=%d rocm=%d, qnn=%d, openvino=%d",
       has_cuda, has_rocm, has_qnn, has_openvino);
 }
@@ -263,6 +336,10 @@ onnxruntime_subplugin::cleanup ()
   fallbackSessionOptions = Ort::SessionOptions{ nullptr };
   env = Ort::Env{ nullptr };
   memInfo = Ort::MemoryInfo{ nullptr };
+
+  if (cudaStream && cudaStreamDestroy_) {
+    cudaStreamDestroy_(cudaStream);
+  }
 
   g_free (model_path);
   model_path = nullptr;
@@ -663,12 +740,20 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
   use_accelerator = parse_accl_hw (accelerators, onnx_accl_support, nullptr, nullptr);
   if (has_cuda && (use_accelerator & ACCL_GPU) && !disable_cuda) {
     auto api = Ort::GetApi();
+
+    int cudaError = cudaStreamCreateWithFlags_(&cudaStream, cudaStreamNonBlocking_);
+    if (cudaError != 0) {
+      const std::string err_msg
+          = "ERROR creating CUDA stream: " + std::to_string(cudaError);
+      throw std::runtime_error (err_msg);
+    }
+    auto cudaStramAsString = std::to_string(reinterpret_cast<unsigned long>(cudaStream));
     if (disable_cuda_graph) {
       sessionOptions = Ort::SessionOptions();
       OrtCUDAProviderOptionsV2* options = nullptr;
       Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-      std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search"};
-      std::vector<const char*> values{"0", "HEURISTIC"};
+      std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream", "do_copy_in_default_stream"};
+      std::vector<const char*> values{"0", "HEURISTIC", cudaStramAsString.c_str(), "0"};
       Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
@@ -678,8 +763,8 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         sessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "cudnn_conv1d_pad_to_nc1d"};
-        std::vector<const char*> values{invoke_dynamic? "0": "1", "HEURISTIC", "1"};
+        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "cudnn_conv1d_pad_to_nc1d", "user_compute_stream", "do_copy_in_default_stream"};
+        std::vector<const char*> values{invoke_dynamic? "0": "1", "HEURISTIC", "1", cudaStramAsString.c_str(), "0"};
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
@@ -689,8 +774,8 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         fallbackSessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search"};
-        std::vector<const char*> values{"0", "HEURISTIC"};
+        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream", "do_copy_in_default_stream"};
+        std::vector<const char*> values{"0", "HEURISTIC", cudaStramAsString.c_str(), "0"};
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         fallbackSessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
@@ -727,84 +812,99 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
 }
 
 void
-onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
-    const GstTensorMemory *input, GstTensorMemory *output)
+onnxruntime_subplugin::prepareInput(
+    const GstTensorMemory *input, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time)
 {
-  size_t i;
-
+#ifndef DEBUG_TIMING
+  (void)alloc_time;
+  (void)copy_time;
+#endif
   if (prop == nullptr || prop->input_meta.format == _NNS_TENSOR_FORMAT_STATIC) {
     /* Set input to tensor */
     // g_warning("invokeDynamic STATIC INPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path,  useCuda(), inputNode.tensors.size (),  inputNode.count);
-    if (useCuda()) {
+    size_t i;
+    if (useCuda ()) {
       bool is_reuse_memory = true;
-      ioBinding.ClearBoundInputs();
+      ioBinding.ClearBoundInputs ();
       if (inputNode.tensor_datas.size () != inputNode.count) {
-        inputNode.tensor_datas.clear();
+        inputNode.tensor_datas.clear ();
         is_reuse_memory = false;
       }
       // g_warning("invokeDynamic STATIC INPUT (%s) SETUP TENSORS is_reuse_memory=%d", model_path,  is_reuse_memory);
-      inputNode.tensors.clear();
+      inputNode.tensors.clear ();
       for (i = 0; i < inputNode.count; ++i) {
         auto shape = inputNode.shapes[i].data ();
         auto shape_size = inputNode.shapes[i].size ();
         if (!is_reuse_memory) {
-          inputNode.tensor_datas.emplace_back(std::unique_ptr<void, CudaMemoryDeleter>(
-              allocator.Alloc(input[i].size), CudaMemoryDeleter(&allocator)));
+          void* cuda_memory = TIME_IT([&] {
+            return allocator.Alloc (input[i].size);
+          }, alloc_time);
+          inputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
+              cuda_memory, CudaMemoryDeleter (&allocator)));
         }
-        cudaMemcpy_(inputNode.tensor_datas[i].get(), input[i].data,
-            input[i].size, cudaMemcpyHostToDevice_);
+        TIME_IT([&] {
+          cudaMemcpyAsync_(inputNode.tensor_datas[i].get (), input[i].data, input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          return nullptr;
+        }, copy_time);
         // Create an OrtValue tensor backed by data on CUDA memory
-        inputNode.tensors.emplace_back(Ort::Value::CreateTensor (memInfo,
-            inputNode.tensor_datas[i].get(), input[i].size, shape,
-            shape_size, inputNode.types[i]));
-        ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
+        inputNode.tensors.emplace_back (
+            Ort::Value::CreateTensor (memInfo, inputNode.tensor_datas[i].get (),
+                input[i].size, shape, shape_size, inputNode.types[i]));
+        ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back ());
       }
     } else {
-      ioBinding.ClearBoundInputs();
-      inputNode.tensors.clear();
-      inputNode.tensor_datas.clear();
+      ioBinding.ClearBoundInputs ();
+      inputNode.tensors.clear ();
+      inputNode.tensor_datas.clear ();
       for (i = 0; i < inputNode.count; ++i) {
         auto shape = inputNode.shapes[i].data ();
         auto shape_size = inputNode.shapes[i].size ();
         inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
-            input[i].data, input[i].size, shape, shape_size, inputNode.types[i]));
+          input[i].data, input[i].size, shape, shape_size, inputNode.types[i]));
         ioBinding.BindInput (inputNode.names[i], inputNode.tensors.back ());
       }
     }
   } else if (prop->input_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE) {
-    ioBinding.ClearBoundInputs();
-    inputNode.tensors.clear();
-    inputNode.tensor_datas.clear();
+    size_t i;
+    ioBinding.ClearBoundInputs ();
+    inputNode.tensors.clear ();
+    inputNode.tensor_datas.clear ();
     inputNode.count = prop->input_meta.num_tensors;
     // g_warning("invokeDynamic FLEXIBLE INPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path, useCuda(), inputNode.tensors.size (),  inputNode.count);
     for (i = 0; i < prop->input_meta.num_tensors; i++) {
       std::vector<int64_t> shape;
-      GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info(&prop->input_meta, i);
+      GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info (&prop->input_meta, i);
       /* revert order between onnxruntime <> nnstreamer dimensions */
       for (auto j = NNS_TENSOR_RANK_LIMIT - 1; j >= 0; j--) {
         if (tensor_info->dimension[j] > 0) {
           if (tensor_info->dimension[j] == NNS_DIMENSION_ZERO_SIZE) {
-            shape.push_back(0);
+            shape.push_back (0);
           } else {
-            shape.push_back(tensor_info->dimension[j]);
+            shape.push_back (tensor_info->dimension[j]);
           }
         }
       }
 
-      if (useCuda()) {
+      if (useCuda ()) {
+        void* cuda_memory = TIME_IT([&] {
+          return allocator.Alloc(input[i].size);
+        }, alloc_time);
         inputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
-            allocator.Alloc(input[i].size), CudaMemoryDeleter(&allocator)));
-        cudaMemcpy_(inputNode.tensor_datas.back ().get (), input[i].data,
-            input[i].size, cudaMemcpyHostToDevice_);
+            cuda_memory, CudaMemoryDeleter (&allocator)));
+        TIME_IT([&] {
+          cudaMemcpyAsync_(inputNode.tensor_datas.back ().get (), input[i].data,
+            input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          return nullptr;
+        }, copy_time);
         inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
             inputNode.tensor_datas.back ().get (), input[i].size, shape.data (),
             shape.size (), inputNode.types[i]));
       } else {
-        inputNode.tensors.emplace_back(
+        inputNode.tensors.emplace_back (
             Ort::Value::CreateTensor (memInfo, input[i].data, input[i].size,
                 shape.data (), shape.size (), inputNode.types[i]));
       }
-      ioBinding.BindInput(inputNode.names[i], inputNode.tensors.back());
+      ioBinding.BindInput (inputNode.names[i], inputNode.tensors.back ());
     }
   } else {
     const std::string err_msg
@@ -812,62 +912,81 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
           + (std::string) gst_tensor_get_format_string (prop->input_meta.format);
     throw std::runtime_error (err_msg);
   }
-
-  /* Set output to tensor */
-
+}
+void
+onnxruntime_subplugin::prepareOutput (GstTensorMemory *output, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &)
+{
+#ifndef DEBUG_TIMING
+  (void)alloc_time;
+#endif
   if (prop == nullptr
       || (prop->output_meta.format == _NNS_TENSOR_FORMAT_STATIC && !prop->invoke_dynamic)) {
     /* Set output to tensor */
     // g_warning("invokeDynamic STATIC OUTPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path, useCuda(), outputNode.tensors.size (),  outputNode.count);
-    if (useCuda()) {
+    size_t i;
+    if (useCuda ()) {
       if (outputNode.tensors.size () != outputNode.count) {
-        ioBinding.ClearBoundOutputs();
-        outputNode.tensors.clear();
-        outputNode.tensor_datas.clear();
+        ioBinding.ClearBoundOutputs ();
+        outputNode.tensors.clear ();
+        outputNode.tensor_datas.clear ();
         for (i = 0; i < outputNode.count; ++i) {
-          outputNode.tensor_datas.emplace_back(std::unique_ptr<void, CudaMemoryDeleter> (
-              allocator.Alloc (output[i].size), CudaMemoryDeleter(&allocator)));
+          void* cuda_memory = TIME_IT([&] {
+            return allocator.Alloc (output[i].size);
+          }, alloc_time);
+          outputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
+              cuda_memory, CudaMemoryDeleter (&allocator)));
           // Create an OrtValue tensor backed by data on CUDA memory
           outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
               outputNode.tensor_datas.back ().get (), output[i].size,
               outputNode.shapes[i].data (), outputNode.shapes[i].size (),
               outputNode.types[i]));
-          ioBinding.BindOutput(outputNode.names[i], outputNode.tensors.back ());
+          ioBinding.BindOutput (outputNode.names[i], outputNode.tensors.back ());
         }
       }
     } else {
-      ioBinding.ClearBoundOutputs();
-      outputNode.tensors.clear();
-      outputNode.tensor_datas.clear();
+      ioBinding.ClearBoundOutputs ();
+      outputNode.tensors.clear ();
+      outputNode.tensor_datas.clear ();
       for (i = 0; i < outputNode.count; ++i) {
         outputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
             output[i].data, output[i].size, outputNode.shapes[i].data (),
             outputNode.shapes[i].size (), outputNode.types[i]));
-        ioBinding.BindOutput(outputNode.names[i], outputNode.tensors.back ());
+        ioBinding.BindOutput (outputNode.names[i], outputNode.tensors.back ());
       }
     }
   } else {
-    ioBinding.ClearBoundOutputs();
-    outputNode.tensors.clear();
-    outputNode.tensor_datas.clear();
+    size_t i;
+    ioBinding.ClearBoundOutputs ();
+    outputNode.tensors.clear ();
+    outputNode.tensor_datas.clear ();
     // g_warning("invokeDynamic FLEXIBLE OUTPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path, useCuda(), outputNode.tensors.size (),  outputNode.count);
     for (i = 0; i < outputNode.count; ++i) {
-      ioBinding.BindOutput(outputNode.names[i], memInfo);
+      ioBinding.BindOutput (outputNode.names[i], memInfo);
     }
   }
-  /* call Run() to fill in the GstTensorMemory *output data with the probabilities of each */
-  session.Run(runOptions, ioBinding);
-
+}
+void
+onnxruntime_subplugin::postProcessInput (GstTensorFilterProperties *prop, std::chrono::nanoseconds &, std::chrono::nanoseconds &)
+{
   /* free input tensors asap - keep only when we want to keep static CUDA memory around for the next invocation */
-   if (!useCuda() || (prop != nullptr && prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC)) {
+  if (!useCuda () || (prop != nullptr && prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC)) {
     // g_warning("invokeDynamic CLEAR INPUT (%s) useCuda=%d, tensors: %ld, count: %ld", model_path,  useCuda(), inputNode.tensors.size (),  inputNode.count);
-    ioBinding.ClearBoundInputs();
-    inputNode.tensors.clear();
-    inputNode.tensor_datas.clear();
+    ioBinding.ClearBoundInputs ();
+    inputNode.tensors.clear ();
+    inputNode.tensor_datas.clear ();
   }
-
+}
+void
+onnxruntime_subplugin::postProcessOutput (
+    GstTensorMemory *output, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time)
+{
+#ifndef DEBUG_TIMING
+  (void)alloc_time;
+  (void)copy_time;
+#endif
   if (prop != nullptr
       && (prop->output_meta.format == _NNS_TENSOR_FORMAT_FLEXIBLE || prop->invoke_dynamic)) {
+    size_t i;
     gst_tensors_info_init (&prop->output_meta);
     auto outputTensors = ioBinding.GetOutputValues();
     prop->output_meta.num_tensors = outputTensors.size ();
@@ -892,30 +1011,103 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
         scalar_count *= dim;
       }
       output[i].size = scalar_count * gst_tensor_get_element_size (tensor_info->type);
-      if (useCuda()) {
-        output[i].data = g_malloc (output[i].size);
-        cudaMemcpy_(output[i].data, outputTensors[i].GetTensorRawData (),
-            output[i].size, cudaMemcpyDeviceToHost_);
-      } else {
-        output[i].data = g_memdup2(outputTensors[i].GetTensorRawData(), output[i].size);
+      if (useCuda ()) {
+        output[i].data = TIME_IT([&] {
+          return g_malloc (output[i].size);
+        }, alloc_time);
+        TIME_IT([&] {
+          cudaMemcpyAsync_(output[i].data, outputTensors[i].GetTensorRawData (),
+            output[i].size, cudaMemcpyDeviceToHost_, cudaStream);
+          return nullptr;
+        }, copy_time);
+      } else
+        {
+        TIME_IT([&] {
+          output[i].data
+            = g_memdup2 (outputTensors[i].GetTensorRawData (), output[i].size);
+          return nullptr;
+        }, alloc_time);
       }
     }
     /* free output tensors finally if dynamic output structure */
-    ioBinding.ClearBoundOutputs();
-    outputNode.tensors.clear();
-    outputNode.tensor_datas.clear();
+    ioBinding.ClearBoundOutputs ();
+    outputNode.tensors.clear ();
+    outputNode.tensor_datas.clear ();
 
   } else if (useCuda()) {
+    size_t i;
     for (i = 0; i < outputNode.tensors.size (); i++) {
-      cudaMemcpy_(output[i].data, outputNode.tensor_datas[i].get (),
-          output[i].size, cudaMemcpyDeviceToHost_);
+      TIME_IT([&] {
+        cudaMemcpyAsync_(output[i].data, outputNode.tensor_datas[i].get (),
+          output[i].size, cudaMemcpyDeviceToHost_, cudaStream);
+        return nullptr;
+      }, copy_time);
     }
   } else {
     /* free output tensors finally if static output structure and NO cuda */
-    ioBinding.ClearBoundOutputs();
-    outputNode.tensors.clear();
-    outputNode.tensor_datas.clear();
+    ioBinding.ClearBoundOutputs ();
+    outputNode.tensors.clear ();
+    outputNode.tensor_datas.clear ();
   }
+}
+void
+onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
+    const GstTensorMemory *input, GstTensorMemory *output)
+{
+  std::chrono::nanoseconds alloc_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds copy_time(std::chrono::nanoseconds::zero());
+#ifdef DEBUG_TIMING
+  std::chrono::nanoseconds total_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds prepare_input_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds prepare_output_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds run_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds post_process_input_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds post_process_output_time(std::chrono::nanoseconds::zero());
+  std::chrono::nanoseconds sync_time(std::chrono::nanoseconds::zero());
+#endif
+
+  TIME_IT([&]{
+    TIME_IT([&] {
+      prepareInput(input, prop, alloc_time, copy_time); return nullptr;
+    }, prepare_input_time);
+    TIME_IT([&] {
+      prepareOutput(output, prop, alloc_time, copy_time); return nullptr;
+    }, prepare_output_time);
+    TIME_IT([&] {
+      session.Run(runOptions, ioBinding); return nullptr;
+    }, run_time);
+    TIME_IT([&] {
+      postProcessInput(prop, alloc_time, copy_time); return nullptr;
+    }, post_process_input_time);
+    TIME_IT([&] {
+      postProcessOutput(output, prop, alloc_time, copy_time); return nullptr;
+    }, post_process_output_time);
+    if (useCuda()) {
+      TIME_IT([&] {
+        cudaStreamSynchronize_(cudaStream);
+        return nullptr;
+      }, sync_time);
+    }
+    return nullptr;
+  }, total_time);
+
+#ifdef DEBUG_TIMING
+  std::chrono::nanoseconds unaccounted_time = total_time - (prepare_input_time + prepare_output_time + run_time + post_process_input_time + post_process_output_time) + sync_time;
+  g_warning("inference for %s - total: %ld alloc: %ld copy: %ld\n"
+            "\t prepare_input: %ld\n"
+            "\t prepare_output: %ld\n"
+            "\t run_time: %ld\n"
+            "\t post_process_input: %ld\n"
+            "\t post_process_output: %ld\n"
+            "\t sync: %ld\n"
+            "\t unaccounted: %ld\n",
+    model_path, total_time.count(), alloc_time.count(), copy_time.count(),
+    prepare_input_time.count(), prepare_output_time.count(),
+    run_time.count(),
+    post_process_input_time.count(), post_process_output_time.count(),
+    sync_time.count(),
+    unaccounted_time.count());
+#endif
 }
 /**
  * @brief Method to execute the model with dynamic tensors.
