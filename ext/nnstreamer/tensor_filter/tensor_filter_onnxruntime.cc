@@ -597,9 +597,7 @@ onnxruntime_subplugin::configureSession (bool force_fallback)
   if (has_cuda && use_gpu && !disable_cuda) {
     memInfo = Ort::MemoryInfo ("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
     runOptions = Ort::RunOptions ();
-    if (enable_cuda_graph) {
-      runOptions.AddConfigEntry ("gpu_graph_id", "1");
-    } else {
+    if (!enable_cuda_graph) {
       runOptions.AddConfigEntry ("gpu_graph_id", "-1");
     }
   } else {
@@ -747,13 +745,13 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
           = "ERROR creating CUDA stream: " + std::to_string(cudaError);
       throw std::runtime_error (err_msg);
     }
-    auto cudaStramAsString = std::to_string(reinterpret_cast<unsigned long>(cudaStream));
-    if (disable_cuda_graph) {
+    auto cudaStreamAsString = std::to_string(reinterpret_cast<unsigned long>(cudaStream));
+    if (disable_cuda_graph || invoke_dynamic) {
       sessionOptions = Ort::SessionOptions();
       OrtCUDAProviderOptionsV2* options = nullptr;
       Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-      std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream", "do_copy_in_default_stream"};
-      std::vector<const char*> values{"0", "HEURISTIC", cudaStramAsString.c_str(), "0"};
+      std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
+      std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
       Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
@@ -763,8 +761,8 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         sessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "cudnn_conv1d_pad_to_nc1d", "user_compute_stream", "do_copy_in_default_stream"};
-        std::vector<const char*> values{invoke_dynamic? "0": "1", "HEURISTIC", "1", cudaStramAsString.c_str(), "0"};
+        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "cudnn_conv1d_pad_to_nc1d"};
+        std::vector<const char*> values{"1", "HEURISTIC", "1"};
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
@@ -774,8 +772,8 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         fallbackSessionOptions = Ort::SessionOptions();
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream", "do_copy_in_default_stream"};
-        std::vector<const char*> values{"0", "HEURISTIC", cudaStramAsString.c_str(), "0"};
+        std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
+        std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         fallbackSessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
@@ -843,7 +841,8 @@ onnxruntime_subplugin::prepareInput(
               cuda_memory, CudaMemoryDeleter (&allocator)));
         }
         TIME_IT([&] {
-          cudaMemcpyAsync_(inputNode.tensor_datas[i].get (), input[i].data, input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          cudaMemcpy_(inputNode.tensor_datas[i].get (), input[i].data, input[i].size, cudaMemcpyHostToDevice_);
+          // cudaMemcpyAsync_(inputNode.tensor_datas[i].get (), input[i].data, input[i].size, cudaMemcpyHostToDevice_, cudaStream);
           return nullptr;
         }, copy_time);
         // Create an OrtValue tensor backed by data on CUDA memory
@@ -892,8 +891,10 @@ onnxruntime_subplugin::prepareInput(
         inputNode.tensor_datas.emplace_back (std::unique_ptr<void, CudaMemoryDeleter> (
             cuda_memory, CudaMemoryDeleter (&allocator)));
         TIME_IT([&] {
-          cudaMemcpyAsync_(inputNode.tensor_datas.back ().get (), input[i].data,
-            input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          // cudaMemcpyAsync_(inputNode.tensor_datas.back ().get (), input[i].data,
+          //   input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          cudaMemcpy_(inputNode.tensor_datas.back ().get (), input[i].data,
+            input[i].size, cudaMemcpyHostToDevice_);
           return nullptr;
         }, copy_time);
         inputNode.tensors.emplace_back (Ort::Value::CreateTensor (memInfo,
