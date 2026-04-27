@@ -235,8 +235,6 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   accl_hw use_accelerator;
   bool use_gpu;
 
-  bool is_capture_complete;
-
   bool disable_cuda;
   bool disable_cuda_graph;
   bool disable_qnn;
@@ -305,7 +303,6 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_accelerator{ ACCL_NONE },
       use_accelerator{ ACCL_NONE },
       use_gpu{ false },
-      is_capture_complete{ false },
       disable_cuda{ false }, disable_cuda_graph{ false },
       disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false },
       cudaStream{ nullptr }
@@ -1088,7 +1085,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
   cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
 
   TIME_IT([&]{
-    if (useCuda() && !is_capture_complete) {
+    if (useCuda()) {
       cudaThreadExchangeStreamCaptureMode_(&mode);
     }
     TIME_IT([&] {
@@ -1109,10 +1106,7 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
     if (useCuda()) {
       TIME_IT([&] {
         cudaStreamSynchronize_(cudaStream);
-        if (!is_capture_complete) {
-          cudaThreadExchangeStreamCaptureMode_(&mode);
-          is_capture_complete = true;
-        }
+        cudaThreadExchangeStreamCaptureMode_(&mode);
         return nullptr;
       }, sync_time);
     }
