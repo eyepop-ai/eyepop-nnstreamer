@@ -76,6 +76,14 @@ typedef enum
   cudaMemcpyDefault_             =   4       /**< Direction of the transfer is inferred from the pointer values. Requires unified virtual addressing */
 } cudaMemcpyKind_;
 
+typedef enum
+{
+  cudaStreamCaptureModeGlobal_ = 0,
+  cudaStreamCaptureModeThreadLocal_ = 1,
+  cudaStreamCaptureModeRelaxed_ = 2
+} cudaStreamCaptureMode_;
+
+
 #define cudaStreamDefault_ 0x00
 #define cudaStreamNonBlocking_ 0x01
 
@@ -97,7 +105,7 @@ typedef int (*cudaMemcpyAsync_t) (
 typedef int (*cudaStreamCreateWithFlags_t) ( cudaStream_t_* pStream, unsigned int  flags );
 typedef int (*cudaStreamDestroy_t) ( cudaStream_t_ stream );
 typedef int (*cudaStreamSynchronize_t) ( cudaStream_t_ stream );
-
+typedef int (*cudaThreadExchangeStreamCaptureMode_t) ( cudaStreamCaptureMode_ * mode );
 static cudaMalloc_t cudaMalloc_ = nullptr;
 static cudaFree_t cudaFree_ = nullptr;
 static cudaMemcpy_t cudaMemcpy_ = nullptr;
@@ -105,6 +113,7 @@ static cudaMemcpyAsync_t cudaMemcpyAsync_ = nullptr;
 static cudaStreamCreateWithFlags_t cudaStreamCreateWithFlags_ = nullptr;
 static cudaStreamDestroy_t cudaStreamDestroy_ = nullptr;
 static cudaStreamSynchronize_t cudaStreamSynchronize_ = nullptr;
+static cudaThreadExchangeStreamCaptureMode_t cudaThreadExchangeStreamCaptureMode_ = nullptr;
 
 static gboolean cudaMemcpy_initialized = FALSE;
 
@@ -153,7 +162,13 @@ static void init_cudaMemcpy() {
               "cudaStreamSynchronize",
               reinterpret_cast<gpointer *> (&cudaStreamSynchronize_))) {
         g_warning("g_module_symbol( ... \"cudaStreamSynchronize\" ...) NOT FOUND");
-              }
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaThreadExchangeStreamCaptureMode",
+              reinterpret_cast<gpointer *> (&cudaThreadExchangeStreamCaptureMode_))) {
+        g_warning("g_module_symbol( ... \"cudaThreadExchangeStreamCaptureMode\" ...) NOT FOUND");
+      }
     }
   }
   cudaMemcpy_initialized = TRUE;
@@ -219,6 +234,8 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
 
   accl_hw use_accelerator;
   bool use_gpu;
+
+  bool is_capture_complete;
 
   bool disable_cuda;
   bool disable_cuda_graph;
@@ -288,6 +305,7 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_accelerator{ ACCL_NONE },
       use_accelerator{ ACCL_NONE },
       use_gpu{ false },
+      is_capture_complete{ false },
       disable_cuda{ false }, disable_cuda_graph{ false },
       disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false },
       cudaStream{ nullptr }
@@ -1067,7 +1085,12 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
   std::chrono::nanoseconds sync_time(std::chrono::nanoseconds::zero());
 #endif
 
+  cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
+
   TIME_IT([&]{
+    if (useCuda() && !is_capture_complete) {
+      cudaThreadExchangeStreamCaptureMode_(&mode);
+    }
     TIME_IT([&] {
       prepareInput(input, prop, alloc_time, copy_time); return nullptr;
     }, prepare_input_time);
@@ -1086,6 +1109,10 @@ onnxruntime_subplugin::invokeDynamic (GstTensorFilterProperties *prop,
     if (useCuda()) {
       TIME_IT([&] {
         cudaStreamSynchronize_(cudaStream);
+        if (!is_capture_complete) {
+          cudaThreadExchangeStreamCaptureMode_(&mode);
+          is_capture_complete = true;
+        }
         return nullptr;
       }, sync_time);
     }
