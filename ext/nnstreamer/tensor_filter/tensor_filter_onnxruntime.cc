@@ -318,6 +318,7 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_qnn = true;
     } else if (provider_name == "OpenVINOExecutionProvider") {
       has_openvino = true;
+
     }
   }
 
@@ -686,6 +687,10 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
     }
     cleanup ();
   }
+
+  // use ORT_LOGGING_LEVEL_VERBOSE to debug ONNX/CUDA
+  env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
+
   filter_props = prop;
 
   nns_logi("num_hw: %d acc string: %s", prop->num_hw, prop->accl_str);
@@ -735,9 +740,6 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
     }
     g_strfreev(custom_properties);
   }
-
-  // use ORT_LOGGING_LEVEL_VERBOSE to debug ONNX/CUDA
-  env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
 
   configureSession (false);
   configured = true;
@@ -815,7 +817,10 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     g_info("onnxruntime_subplugin::setAccelerator has_rocm");
   } else if (has_openvino && (use_accelerator & ACCL_GPU)) {
     sessionOptions = Ort::SessionOptions();
-    sessionOptions.AppendExecutionProvider("OpenVINO");
+    std::unordered_map<std::string, std::string> options;
+    options["device_type"] = "GPU";
+    options["enable_qdq_optimizer"] = "True";
+    sessionOptions.AppendExecutionProvider_OpenVINO_V2(options);
     g_info("onnxruntime_subplugin::setAccelerator openvino");
   } else {
     use_gpu = FALSE;
@@ -1243,7 +1248,7 @@ onnxruntime_subplugin::init_filter_onnxruntime ()
   Ort::InitApi();
   std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
   for (auto f : availableProviders) {
-    nns_logi("onnxruntime filter found provider: %s", f.c_str());
+    nns_logi("onnxruntime %s filter found provider: %s",  Ort::GetVersionString().c_str(), f.c_str());
   }
 
   registeredRepresentation
