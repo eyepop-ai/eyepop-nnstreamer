@@ -1910,6 +1910,19 @@ gst_tensor_transform_transform (GstBaseTransform * trans,
     }
 
     out_mem[i] = gst_allocator_alloc (NULL, buf_size, NULL);
+    {
+      GstMemoryMapInfo info;
+      if (gst_memory_map (out_mem[i], &info, GST_MAP_WRITE)) {
+        // 3. Manually zero the memory
+        memset (info.data, 0, sizeof(GstTensorMetaInfo));
+        // 4. Unmap when done
+        gst_memory_unmap (out_mem[i], &info);
+      } else {
+        ml_loge ("Cannot map output buffer to gst-buf at tensor-transform.\n");
+        res = GST_FLOW_ERROR;
+        goto done;
+      }
+    }
     gst_tensor_buffer_append_memory (outbuf, out_mem[i], out_info);
 
     if (!gst_memory_map (out_mem[i], &out_map[i], GST_MAP_WRITE)) {
