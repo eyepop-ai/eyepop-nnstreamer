@@ -753,6 +753,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
 {
   use_gpu = TRUE;
   use_accelerator = parse_accl_hw (accelerators, onnx_accl_support, nullptr, nullptr);
+  g_info("onnxruntime_subplugin::setAccelerator(%s) CPU=%d GPU=%d NPU=%d", accelerators, use_accelerator & ACCL_CPU, use_accelerator & ACCL_GPU, use_accelerator & ACCL_NPU);
   if (has_cuda && (use_accelerator & ACCL_GPU) && !disable_cuda) {
     auto api = Ort::GetApi();
 
@@ -797,16 +798,21 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on fallbackSessionOptions", keys.size());
       }
     }
-  } else if (has_qnn && (use_accelerator & ACCL_NPU)) {
+  } else if (has_qnn && (use_accelerator & (ACCL_NPU | ACCL_GPU))) {
     sessionOptions = Ort::SessionOptions();
-#if (defined(_WIN32) || defined(__CYGWIN__))
     std::unordered_map<std::string, std::string> provider_options;
+#if (defined(_WIN32) || defined(__CYGWIN__))
     provider_options["backend_path"] = "QnnHtp.dll";
     sessionOptions.AppendExecutionProvider("QNN", provider_options);
-    g_info("onnxruntime_subplugin::setAccelerator qnn");
 #else
+    provider_options["backend_path"] = "libQnnHtp.so";
+    provider_options["backend_type"] = "htp";
+    provider_options["htp_arch"] = "v73";
+    provider_options["profiling_level"] = "off";
+
     sessionOptions.AppendExecutionProvider("QNN");
 #endif
+    g_info("onnxruntime_subplugin::setAccelerator qnn");
   } else if (has_rocm && (use_accelerator & ACCL_GPU)) {
     sessionOptions = Ort::SessionOptions();
     auto api = Ort::GetApi();
