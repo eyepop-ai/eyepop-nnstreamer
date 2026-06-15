@@ -190,6 +190,66 @@ struct CudaMemoryDeleter {
   const Ort::Allocator* alloc_;
 };
 
+static gboolean ortOptions_initialized = FALSE;
+static OrtLoggingLevel ortOption_log_level = ORT_LOGGING_LEVEL_WARNING;
+static std::vector<std::pair<std::string, std::string>> ortOptions_provider_options;
+static std::vector<std::pair<std::string, std::string>> ortOptions_config_entries;
+
+#define ORT_LOG_LEVEL "ORT_LOG_LEVEL"
+#define ORT_PROVIDER_OPTION_ENV_PREFIX "ORT_PROVIDER_OPTION_"
+#define ORT_CONFIG_ENTRY_ENV_PREFIX "ORT_CONFIG_ENTRY_"
+
+static gboolean str_has_prefix_case_insensitive(const gchar *str, const gchar *prefix) {
+  if (str == NULL || prefix == NULL) {
+    return FALSE;
+  }
+  gsize prefix_len = strlen(prefix);
+  gsize str_len = strlen(str);
+  // The string must be at least as long as the prefix
+  if (str_len < prefix_len) {
+    return FALSE;
+  }
+  // Compare ignoring case for the length of the prefix
+  return g_ascii_strncasecmp(str, prefix, prefix_len) == 0;
+}
+
+static void init_ortOptions() {
+  if (ortOptions_initialized) {
+    return;
+  }
+
+  gchar **envp = g_get_environ();
+  for (gchar **env = envp; *env; env++) {
+    if (g_ascii_strcasecmp(*env, ORT_LOG_LEVEL) == 0) {
+      const gchar* log_level_string = g_getenv(*env);
+      if (log_level_string) {
+        if (g_ascii_strcasecmp(log_level_string, "FATAL") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_FATAL;
+        } else if (g_ascii_strcasecmp(log_level_string, "ERROR") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_ERROR;
+        } else if (g_ascii_strcasecmp(log_level_string, "WARNING") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_WARNING;
+        } else if (g_ascii_strcasecmp(log_level_string, "INFO") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_INFO;
+        } else if (g_ascii_strcasecmp(log_level_string, "VERBOSE") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_VERBOSE;
+        }
+      }
+    } else if (str_has_prefix_case_insensitive(*env, ORT_PROVIDER_OPTION_ENV_PREFIX)) {
+      const gchar *key = *env + strlen(ORT_PROVIDER_OPTION_ENV_PREFIX);
+      const gchar* value = g_getenv(*env);
+      ortOptions_provider_options.emplace_back(key, value);
+    } else if (str_has_prefix_case_insensitive(*env, ORT_CONFIG_ENTRY_ENV_PREFIX)) {
+      const gchar *key = *env + strlen(ORT_CONFIG_ENTRY_ENV_PREFIX);
+      const gchar* value = g_getenv(*env);
+      ortOptions_config_entries.emplace_back(key, value);
+    }
+  }
+  g_strfreev(envp);
+
+  ortOptions_initialized = TRUE;
+}
+
 static const gchar *onnx_accl_support[] = { ACCL_CPU_STR, ACCL_GPU_STR, ACCL_NPU_STR, nullptr };
 
 /** @brief tensor-filter-subplugin concrete class for onnxruntime */
@@ -307,6 +367,7 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false },
       cudaStream{ nullptr }
 {
+  init_ortOptions();
   std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
   for (auto provider_name : availableProviders) {
     if (provider_name == "CUDAExecutionProvider") {
@@ -689,7 +750,7 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   }
 
   // use ORT_LOGGING_LEVEL_VERBOSE to debug ONNX/CUDA
-  env = Ort::Env (ORT_LOGGING_LEVEL_WARNING, "nnstreamer_onnxruntime");
+  env = Ort::Env (ortOption_log_level, "nnstreamer_onnxruntime");
 
   filter_props = prop;
 
@@ -800,18 +861,12 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     }
   } else if (has_qnn && (use_accelerator & (ACCL_NPU | ACCL_GPU))) {
     sessionOptions = Ort::SessionOptions();
-    std::unordered_map<std::string, std::string> provider_options;
-#if (defined(_WIN32) || defined(__CYGWIN__))
-    provider_options["backend_path"] = "QnnHtp.dll";
-    sessionOptions.AppendExecutionProvider("QNN", provider_options);
-#else
-    provider_options["backend_path"] = "libQnnHtp.so";
-    provider_options["backend_type"] = "htp";
-    provider_options["htp_arch"] = "v73";
-    provider_options["profiling_level"] = "off";
-
+    std::unordered_map<std::string, std::string> options;
+    options["backend_type"] = "htp";
+    for (const auto& o : ortOptions_provider_options) {
+      options[o.first] = o.second;
+    }
     sessionOptions.AppendExecutionProvider("QNN");
-#endif
     g_info("onnxruntime_subplugin::setAccelerator qnn");
   } else if (has_rocm && (use_accelerator & ACCL_GPU)) {
     sessionOptions = Ort::SessionOptions();
@@ -826,12 +881,18 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     std::unordered_map<std::string, std::string> options;
     options["device_type"] = "GPU";
     options["enable_qdq_optimizer"] = "True";
+    for (const auto& o : ortOptions_provider_options) {
+      options[o.first] = o.second;
+    }
     sessionOptions.AppendExecutionProvider_OpenVINO_V2(options);
     g_info("onnxruntime_subplugin::setAccelerator openvino");
   } else {
     use_gpu = FALSE;
     sessionOptions = Ort::SessionOptions();
     g_info("onnxruntime_subplugin::setAccelerator NONE");
+  }
+  for (const auto& entry : ortOptions_config_entries) {
+    sessionOptions.AddConfigEntry(entry.first.c_str(), entry.second.c_str());
   }
 }
 
