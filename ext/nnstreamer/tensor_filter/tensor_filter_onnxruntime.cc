@@ -220,8 +220,10 @@ static void init_ortOptions() {
 
   gchar **envp = g_get_environ();
   for (gchar **env = envp; *env; env++) {
-    if (g_ascii_strcasecmp(*env, ORT_LOG_LEVEL) == 0) {
-      const gchar* log_level_string = g_getenv(*env);
+    gchar **name_value = g_strsplit(*env, "=", 2);
+    if (g_ascii_strcasecmp(name_value[0], ORT_LOG_LEVEL) == 0) {
+      const gchar* log_level_string = name_value[1];
+      g_info("init_ortOptions log level %s=%s", name_value[0], log_level_string);
       if (log_level_string) {
         if (g_ascii_strcasecmp(log_level_string, "FATAL") == 0) {
           ortOption_log_level = ORT_LOGGING_LEVEL_FATAL;
@@ -235,15 +237,18 @@ static void init_ortOptions() {
           ortOption_log_level = ORT_LOGGING_LEVEL_VERBOSE;
         }
       }
-    } else if (str_has_prefix_case_insensitive(*env, ORT_PROVIDER_OPTION_ENV_PREFIX)) {
-      const gchar *key = *env + strlen(ORT_PROVIDER_OPTION_ENV_PREFIX);
-      const gchar* value = g_getenv(*env);
+    } else if (str_has_prefix_case_insensitive(name_value[0], ORT_PROVIDER_OPTION_ENV_PREFIX)) {
+      const gchar *key = name_value[0] + strlen(ORT_PROVIDER_OPTION_ENV_PREFIX);
+      const gchar* value = name_value[1];
+      g_info("init_ortOptions options %s %s=%s", name_value[0], key, value);
       ortOptions_provider_options.emplace_back(key, value);
-    } else if (str_has_prefix_case_insensitive(*env, ORT_CONFIG_ENTRY_ENV_PREFIX)) {
-      const gchar *key = *env + strlen(ORT_CONFIG_ENTRY_ENV_PREFIX);
-      const gchar* value = g_getenv(*env);
+    } else if (str_has_prefix_case_insensitive(name_value[0], ORT_CONFIG_ENTRY_ENV_PREFIX)) {
+      const gchar *key = name_value[0] + strlen(ORT_CONFIG_ENTRY_ENV_PREFIX);
+      const gchar* value = name_value[1];
+      g_info("init_ortOptions config %s %s=%s", name_value[0], key, value);
       ortOptions_config_entries.emplace_back(key, value);
     }
+    g_strfreev(name_value);
   }
   g_strfreev(envp);
 
