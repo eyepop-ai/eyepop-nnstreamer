@@ -836,6 +836,10 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
       Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
       std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
       std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
+      for (const auto& o : ortOptions_provider_options) {
+        keys.emplace_back(o.first.c_str());
+        values.emplace_back(o.second.c_str());
+      }
       Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
@@ -847,6 +851,10 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
         std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "cudnn_conv1d_pad_to_nc1d"};
         std::vector<const char*> values{"1", "HEURISTIC", "1"};
+        for (const auto& o : ortOptions_provider_options) {
+          keys.emplace_back(o.first.c_str());
+          values.emplace_back(o.second.c_str());
+        }
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
@@ -858,6 +866,10 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
         std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
         std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
+        for (const auto& o : ortOptions_provider_options) {
+          keys.emplace_back(o.first.c_str());
+          values.emplace_back(o.second.c_str());
+        }
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
         fallbackSessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
