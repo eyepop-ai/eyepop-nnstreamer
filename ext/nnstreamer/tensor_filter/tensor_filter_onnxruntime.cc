@@ -291,6 +291,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
 
   Ort::MemoryInfo memInfo;
 
+  bool has_tensorrt;
   bool has_cuda;
   bool has_qnn;
   bool has_rocm;
@@ -300,6 +301,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   accl_hw use_accelerator;
   bool use_gpu;
 
+  bool enable_tensorrt;
   bool disable_cuda;
   bool disable_cuda_graph;
   bool disable_qnn;
@@ -326,7 +328,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
       const GstTensorMemory *input, GstTensorMemory *output);
   void configureSession (bool force_fallback);
 
-  bool useCuda() { return use_gpu && has_cuda && !disable_cuda; }
+  bool useCuda() { return use_gpu && ((has_cuda && !disable_cuda) || (has_tensorrt && enable_tensorrt)); }
 
   cudaStream_t_ cudaStream;
 
@@ -363,11 +365,13 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       runOptions{ nullptr },
       allocator{ nullptr },
       memInfo{ nullptr },
+      has_tensorrt{ false },
       has_cuda{ false }, has_qnn{ false },
       has_rocm{ false }, has_openvino{ false },
       has_accelerator{ ACCL_NONE },
       use_accelerator{ ACCL_NONE },
       use_gpu{ false },
+      enable_tensorrt{ false },
       disable_cuda{ false }, disable_cuda_graph{ false },
       disable_qnn{ false }, disable_rocm{ false }, disable_openvino{ false },
       cudaStream{ nullptr }
@@ -378,7 +382,10 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
     if (provider_name == "CUDAExecutionProvider") {
       init_cudaMemcpy();
       has_cuda = true;
-    } else if (provider_name == "ROCMExecutionProvider") {
+    } else if (provider_name == "TensorrtExecutionProvider") {
+        init_cudaMemcpy();
+        has_tensorrt = true;
+      } else if (provider_name == "ROCMExecutionProvider") {
       has_rocm = true;
     } else if (provider_name == "QNNExecutionProvider") {
       has_qnn = true;
@@ -388,8 +395,8 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
     }
   }
 
-  nns_logi("onnxruntime provider: cuda=%d rocm=%d, qnn=%d, openvino=%d",
-      has_cuda, has_rocm, has_qnn, has_openvino);
+  nns_logi("onnxruntime provider: tensorrt=%d cuda=%d rocm=%d, qnn=%d, openvino=%d",
+      has_tensorrt, has_cuda, has_rocm, has_qnn, has_openvino);
 }
 
 /**
@@ -676,7 +683,7 @@ onnxruntime_subplugin::configureSession (bool force_fallback)
         std::string ("Too many output tensors: ") + std::to_string (num_outputs)
         + std::string ("max: ") + NNS_TENSOR_SIZE_LIMIT_STR);
   }
-  if (has_cuda && use_gpu && !disable_cuda) {
+  if (useCuda()) {
     memInfo = Ort::MemoryInfo ("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
     runOptions = Ort::RunOptions ();
     if (!enable_cuda_graph) {
@@ -763,6 +770,28 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   for (int j = 0; j < prop->num_hw; j++) {
     nns_logi("prop->hw_list[i]: %d", prop->hw_list[j]);
   }
+
+  if (prop && prop->custom_properties) {
+    g_info("onnxruntime_subplugin::configure_instance prop->custom_properties=%s", prop->custom_properties);
+    gchar** custom_properties = g_strsplit(prop->custom_properties, ";", 0);
+    for (int i = 0; custom_properties[i]; i++) {
+      if (strcmp(custom_properties[i], "disable_cuda") == 0) {
+        disable_cuda = true;
+      } else if (strcmp(custom_properties[i], "enable_tensorrt") == 0) {
+        enable_tensorrt = true;
+      } else if (strcmp(custom_properties[i], "disable_cuda_graph") == 0) {
+        disable_cuda_graph = true;
+      } else if (strcmp(custom_properties[i], "disable_qnn") == 0) {
+        disable_qnn = true;
+      } else if (strcmp(custom_properties[i], "disable_rocm") == 0) {
+        disable_rocm = true;
+      } else if (strcmp(custom_properties[i], "disable_openvi") == 0) {
+        disable_openvino = true;
+      }
+    }
+    g_strfreev(custom_properties);
+  }
+
   bool is_invoke_dynamic = filter_props != nullptr && (
                                prop->invoke_dynamic ||
                                prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC ||
@@ -789,24 +818,6 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   model_path = g_strdup (prop->model_files[0]);
 #endif
 
-  if (prop && prop->custom_properties) {
-    gchar** custom_properties = g_strsplit(prop->custom_properties, ";", 0);
-    for (int i = 0; custom_properties[i]; i++) {
-      if (strcmp(custom_properties[i], "disable_cuda") == 0) {
-        disable_cuda = true;
-      } else if (strcmp(custom_properties[i], "disable_cuda_graph") == 0) {
-        disable_cuda_graph = true;
-      } else if (strcmp(custom_properties[i], "disable_qnn") == 0) {
-        disable_qnn = true;
-      } else if (strcmp(custom_properties[i], "disable_rocm") == 0) {
-        disable_rocm = true;
-      } else if (strcmp(custom_properties[i], "disable_openvi") == 0) {
-        disable_openvino = true;
-      }
-    }
-    g_strfreev(custom_properties);
-  }
-
   configureSession (false);
   configured = true;
 }
@@ -820,9 +831,60 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
   use_gpu = TRUE;
   use_accelerator = parse_accl_hw (accelerators, onnx_accl_support, nullptr, nullptr);
   g_info("onnxruntime_subplugin::setAccelerator(%s) CPU=%d GPU=%d NPU=%d", accelerators, use_accelerator & ACCL_CPU, use_accelerator & ACCL_GPU, use_accelerator & ACCL_NPU);
-  if (has_cuda && (use_accelerator & ACCL_GPU) && !disable_cuda) {
+  if (has_tensorrt && (use_accelerator & ACCL_GPU) && enable_tensorrt) {
     auto api = Ort::GetApi();
+    int cudaError = cudaStreamCreateWithFlags_(&cudaStream, cudaStreamNonBlocking_);
+    if (cudaError != 0) {
+      const std::string err_msg
+          = "ERROR creating CUDA stream: " + std::to_string(cudaError);
+      throw std::runtime_error (err_msg);
+    }
+    auto cudaStreamAsString = std::to_string(reinterpret_cast<unsigned long>(cudaStream));
+    sessionOptions = Ort::SessionOptions();
 
+    sessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    // 3. Configure TensorRT Options
+    // You can pass an structure or use the helper function depending on your ORT version
+    OrtTensorRTProviderOptions trt_options;
+
+    trt_options.device_id = 0;
+    trt_options.has_user_compute_stream = 1;
+    trt_options.user_compute_stream = cudaStream;
+
+    trt_options.trt_fp16_enable = 0;
+    trt_options.trt_int8_enable = 0;
+    // (Optional) Enable caching to skip compilation on subsequent runs
+    trt_options.trt_dump_subgraphs = 0;
+    trt_options.trt_engine_cache_enable = 1;
+    trt_options.trt_engine_cache_path = nullptr;
+    trt_options.trt_engine_decryption_lib_path = nullptr;
+    trt_options.trt_engine_decryption_enable = 0;
+    trt_options.trt_int8_calibration_table_name = nullptr;
+
+    for (const auto& o : ortOptions_provider_options) {
+      if (o.first == "trt_fp16_enable") {
+        trt_options.trt_fp16_enable = atoi(o.second.c_str());
+      } else if (o.first == "trt_int8_enable") {
+        trt_options.trt_int8_enable = atoi(o.second.c_str());
+      }
+    }
+    // 4. Append the TensorRT Provider to Session Options
+    sessionOptions.AppendExecutionProvider_TensorRT(trt_options);
+
+    // Fallback to standard CUDA provider for ops unsupported by TensorRT
+    OrtCUDAProviderOptionsV2* options = nullptr;
+    Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
+    std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
+    std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
+    Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
+    sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
+
+    api.ReleaseCUDAProviderOptions(options);
+
+    g_info("onnxruntime_subplugin::setAccelerator tensorrt: set %ld TensorRT options on sessionOptions", keys.size());
+  } else if (has_cuda && (use_accelerator & ACCL_GPU) && !disable_cuda) {
+    auto api = Ort::GetApi();
     int cudaError = cudaStreamCreateWithFlags_(&cudaStream, cudaStreamNonBlocking_);
     if (cudaError != 0) {
       const std::string err_msg
@@ -839,7 +901,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
       Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
-      g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on fallbackSessionOptions", keys.size());
+      g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options on sessionOptions", keys.size());
     } else {
       {
         sessionOptions = Ort::SessionOptions();
