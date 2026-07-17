@@ -851,6 +851,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     trt_options.device_id = 0;
     trt_options.has_user_compute_stream = 1;
     trt_options.user_compute_stream = cudaStream;
+    trt_options.trt_cuda_graph_enable = 1;
 
     trt_options.trt_fp16_enable = 0;
     trt_options.trt_int8_enable = 0;
