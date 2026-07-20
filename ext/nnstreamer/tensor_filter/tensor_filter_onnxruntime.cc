@@ -796,7 +796,6 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
                                prop->invoke_dynamic ||
                                prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC ||
                                prop->output_meta.format != _NNS_TENSOR_FORMAT_STATIC);
-  setAccelerator(prop->accl_str, is_invoke_dynamic);
   if (!g_file_test (prop->model_files[0], G_FILE_TEST_IS_REGULAR)) {
     const std::string err_msg
         = "Given file " + (std::string) prop->model_files[0] + " is not valid";
@@ -818,6 +817,7 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   model_path = g_strdup (prop->model_files[0]);
 #endif
 
+  setAccelerator(prop->accl_str, is_invoke_dynamic);
   configureSession (false);
   configured = true;
 }
@@ -873,7 +873,6 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         "0",
         trt_fp16_enable,
         trt_int8_enable,
-
         "0",
         "1",
         modelDir,
