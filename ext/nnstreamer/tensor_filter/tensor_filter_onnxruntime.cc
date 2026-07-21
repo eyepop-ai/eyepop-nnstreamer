@@ -195,7 +195,7 @@ static OrtLoggingLevel ortOption_log_level = ORT_LOGGING_LEVEL_WARNING;
 static std::vector<std::pair<std::string, std::string>> ortOptions_provider_options;
 static std::vector<std::pair<std::string, std::string>> ortOptions_config_entries;
 
-#define ORT_LOG_LEVEL "ORT_LOG_LEVEL"
+#define ORT_LOG_LEVEL "V"
 #define ORT_PROVIDER_OPTION_ENV_PREFIX "ORT_PROVIDER_OPTION_"
 #define ORT_CONFIG_ENTRY_ENV_PREFIX "ORT_CONFIG_ENTRY_"
 
@@ -853,8 +853,6 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
       const gchar * trt_fp16_enable = "1";
       const gchar * trt_int8_enable = "0";
       const gchar * trt_engine_cache_enable = "1";
-      const gchar * trt_dump_ep_context_model = isModelDirWriteable? "1": "0";
-
 
       for (const auto& o : ortOptions_provider_options) {
         if (o.first == "trt_fp16_enable") {
@@ -863,9 +861,11 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
           trt_int8_enable = o.second.c_str();
         }
       }
-      const gchar* cachePath = isModelDirWriteable? modelDir: g_get_tmp_dir();
+
+      const gchar* cachePath = isModelDirWriteable? modelDir : g_get_tmp_dir();
       std::vector<const char*> keys{
         "device_id",
+        "trt_onnx_model_folder_path",
         "trt_cuda_graph_enable",
         "trt_fp16_enable",
         "trt_int8_enable",
@@ -873,11 +873,11 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         "trt_engine_cache_path",
         "trt_timing_cache_enable",
         "trt_timing_cache_path",
-        "trt_dump_ep_context_model",
       };
 
       std::vector<const char*> values{
         "0",
+        modelDir,
         "1",
         trt_fp16_enable,
         trt_int8_enable,
@@ -885,17 +885,14 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         cachePath,
         trt_engine_cache_enable,
         cachePath,
-        trt_dump_ep_context_model
       };
 
-      if (isModelDirWriteable) {
-        keys.emplace_back("trt_ep_context_file_path");
-        values.emplace_back(cachePath);
-      }
-      g_info("onnxruntime_subplugin::setAccelerator tensorrt: trt_engine_cache_path=%s trt_engine_cache_enable=%s trt_dump_ep_context_model=%s TensorRT options on sessionOptions",
+      g_info("onnxruntime_subplugin::setAccelerator tensorrt: trt_engine_cache_path=%s model_dir=%s trt_engine_cache_enable=%s TensorRT options on sessionOptions",
+        cachePath,
         modelDir,
-        trt_engine_cache_enable,
-        trt_dump_ep_context_model);
+        trt_engine_cache_enable);
+
+      Ort::ThrowOnError(api.UpdateTensorRTProviderOptions(options, keys.data(), values.data(), keys.size()));
 
       // this implicitly sets "has_user_compute_stream"
       Ort::ThrowOnError(api.UpdateTensorRTProviderOptionsWithValue(options, "user_compute_stream", cudaStream));
