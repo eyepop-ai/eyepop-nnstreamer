@@ -341,6 +341,10 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
 
   tensor_filter_subplugin &getEmptyInstance ();
   void configure_instance (const GstTensorFilterProperties *prop);
+  OrtTensorRTProviderOptionsV2 * createTensorRtOptions (
+    OrtApi api, const gchar *modelDir,
+    gboolean isModelDirWriteable,
+    gboolean isCudaGraph);
   void invoke (const GstTensorMemory *input, GstTensorMemory *output);
   void invoke_dynamic (GstTensorFilterProperties *prop,
       const GstTensorMemory *input, GstTensorMemory *output);
@@ -822,6 +826,59 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   configured = true;
 }
 
+OrtTensorRTProviderOptionsV2*
+onnxruntime_subplugin::createTensorRtOptions (
+  OrtApi api, const gchar *modelDir,
+  gboolean isModelDirWriteable,
+  gboolean isCudaGraph)
+{
+  OrtTensorRTProviderOptionsV2* options = nullptr;
+  Ort::ThrowOnError (api.CreateTensorRTProviderOptions (&options));
+  const gchar *trt_fp16_enable = "1";
+  const gchar *trt_int8_enable = "0";
+  const gchar *trt_engine_cache_enable = "1";
+
+  for (const auto &o : ortOptions_provider_options) {
+    if (o.first == "trt_fp16_enable") {
+      trt_fp16_enable = o.second.c_str ();
+    } else if (o.first == "trt_int8_enable") {
+      trt_int8_enable = o.second.c_str ();
+    }
+  }
+
+  const gchar *cachePath = isModelDirWriteable ? modelDir : g_get_tmp_dir ();
+  std::vector<const char *> keys{
+    "device_id",
+    "trt_onnx_model_folder_path",
+    "trt_cuda_graph_enable",
+    "trt_fp16_enable",
+    "trt_int8_enable",
+    "trt_engine_cache_enable",
+    "trt_engine_cache_path",
+    "trt_timing_cache_enable",
+    "trt_timing_cache_path",
+  };
+
+  std::vector<const char *> values{
+    "0",
+    modelDir,
+    isCudaGraph? "1" : "0",
+    trt_fp16_enable,
+    trt_int8_enable,
+    trt_engine_cache_enable,
+    cachePath,
+    trt_engine_cache_enable,
+    cachePath,
+  };
+
+  Ort::ThrowOnError (api.UpdateTensorRTProviderOptions (
+      options, keys.data (), values.data (), keys.size ()));
+
+  // this implicitly sets "has_user_compute_stream"
+  Ort::ThrowOnError (api.UpdateTensorRTProviderOptionsWithValue (
+      options, "user_compute_stream", cudaStream));
+  return options;
+}
 /**
  * @brief	Set the accelerator for the onnx
  */
@@ -841,79 +898,48 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     }
     auto cudaStreamAsString = std::to_string(reinterpret_cast<unsigned long>(cudaStream));
     sessionOptions = Ort::SessionOptions();
+    fallbackSessionOptions = Ort::SessionOptions();
 
     sessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    fallbackSessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     {
       gchar *modelDir = g_path_get_dirname(model_path);
       gboolean isModelDirWriteable = access(modelDir, W_OK) == 0;
-      // 3. Configure TensorRT Options
-      OrtTensorRTProviderOptionsV2* options = nullptr;
-      Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&options));
-      const gchar * trt_fp16_enable = "1";
-      const gchar * trt_int8_enable = "0";
-      const gchar * trt_engine_cache_enable = "1";
-
-      for (const auto& o : ortOptions_provider_options) {
-        if (o.first == "trt_fp16_enable") {
-          trt_fp16_enable = o.second.c_str();
-        } else if (o.first == "trt_int8_enable") {
-          trt_int8_enable = o.second.c_str();
-        }
-      }
-
-      const gchar* cachePath = isModelDirWriteable? modelDir : g_get_tmp_dir();
-      std::vector<const char*> keys{
-        "device_id",
-        "trt_onnx_model_folder_path",
-        "trt_cuda_graph_enable",
-        "trt_fp16_enable",
-        "trt_int8_enable",
-        "trt_engine_cache_enable",
-        "trt_engine_cache_path",
-        "trt_timing_cache_enable",
-        "trt_timing_cache_path",
-      };
-
-      std::vector<const char*> values{
-        "0",
-        modelDir,
-        "1",
-        trt_fp16_enable,
-        trt_int8_enable,
-        trt_engine_cache_enable,
-        cachePath,
-        trt_engine_cache_enable,
-        cachePath,
-      };
-
-      g_info("onnxruntime_subplugin::setAccelerator tensorrt: trt_engine_cache_path=%s model_dir=%s trt_engine_cache_enable=%s TensorRT options on sessionOptions",
-        cachePath,
-        modelDir,
-        trt_engine_cache_enable);
-
-      Ort::ThrowOnError(api.UpdateTensorRTProviderOptions(options, keys.data(), values.data(), keys.size()));
-
-      // this implicitly sets "has_user_compute_stream"
-      Ort::ThrowOnError(api.UpdateTensorRTProviderOptionsWithValue(options, "user_compute_stream", cudaStream));
-
-      // 4. Append the TensorRT Provider to Session Options
+      // Configure TensorRT Options
+      OrtTensorRTProviderOptionsV2* options = createTensorRtOptions(api, modelDir, isModelDirWriteable, true);
+      OrtTensorRTProviderOptionsV2* fallbackOptions = createTensorRtOptions(api, modelDir, isModelDirWriteable, false);
       sessionOptions.AppendExecutionProvider_TensorRT_V2(*options);
+      fallbackSessionOptions.AppendExecutionProvider_TensorRT_V2(*fallbackOptions);
       api.ReleaseTensorRTProviderOptions(options);
+      api.ReleaseTensorRTProviderOptions(fallbackOptions);
+
+      g_info("onnxruntime_subplugin::setAccelerator tensorrt");
       g_free(modelDir);
-      g_info("onnxruntime_subplugin::setAccelerator tensorrt: set %ld TensorRT options on sessionOptions", keys.size()+1);
     }
     {
-      // Fallback to standard CUDA provider for ops unsupported by TensorRT
+      // Standard CUDA provider for ops unsupported by TensorRT
       OrtCUDAProviderOptionsV2* options = nullptr;
       Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
       std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
-      std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
+      std::vector<const char*> values{"1", "HEURISTIC", cudaStreamAsString.c_str()};
       Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
       g_info("onnxruntime_subplugin::setAccelerator tensorrt: set %ld CUDA options on sessionOptions", keys.size());
     }
+    {
+      // Standard CUDA provider for ops unsupported by TensorRT
+      OrtCUDAProviderOptionsV2* options = nullptr;
+      Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
+      std::vector<const char*> keys{"enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
+      std::vector<const char*> values{"0", "HEURISTIC", cudaStreamAsString.c_str()};
+      Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
+      fallbackSessionOptions.AppendExecutionProvider_CUDA_V2(*options);
+      api.ReleaseCUDAProviderOptions(options);
+      g_info("onnxruntime_subplugin::setAccelerator tensorrt: set %ld CUDA options on fallbackSessionOptions", keys.size());
+    }
+
   } else if (has_cuda && (use_accelerator & ACCL_GPU) && !disable_cuda) {
     auto api = Ort::GetApi();
     int cudaError = cudaStreamCreateWithFlags_(&cudaStream, cudaStreamNonBlocking_);
