@@ -845,38 +845,35 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     sessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     {
+      gchar *modelDir = g_path_get_dirname(model_path);
+      gboolean isModelDirWriteable = access(modelDir, W_OK) == 0;
       // 3. Configure TensorRT Options
       OrtTensorRTProviderOptionsV2* options = nullptr;
       Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&options));
       const gchar * trt_fp16_enable = "1";
       const gchar * trt_int8_enable = "0";
       const gchar * trt_engine_cache_enable = "1";
-      const gchar * trt_dump_ep_context_model = "1";
+      const gchar * trt_dump_ep_context_model = isModelDirWriteable? "1": "0";
 
-      gchar *modelDir = g_path_get_dirname(model_path);
+
       for (const auto& o : ortOptions_provider_options) {
         if (o.first == "trt_fp16_enable") {
           trt_fp16_enable = o.second.c_str();
         } else if (o.first == "trt_int8_enable") {
           trt_int8_enable = o.second.c_str();
-        } else if (o.first == "trt_engine_cache_path") {
-          g_free(modelDir);
-          modelDir = g_strdup(o.second.c_str());
-        } else if (o.first == "trt_dump_ep_context_model") {
-          trt_dump_ep_context_model = o.second.c_str();
         }
       }
+      const gchar* cachePath = isModelDirWriteable? modelDir: g_get_tmp_dir();
       std::vector<const char*> keys{
         "device_id",
         "trt_cuda_graph_enable",
         "trt_fp16_enable",
         "trt_int8_enable",
-        "trt_dump_subgraphs",
         "trt_engine_cache_enable",
         "trt_engine_cache_path",
         "trt_timing_cache_enable",
         "trt_timing_cache_path",
-        "trt_dump_ep_context_model"
+        "trt_dump_ep_context_model",
       };
 
       std::vector<const char*> values{
@@ -884,17 +881,22 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
         "1",
         trt_fp16_enable,
         trt_int8_enable,
-        "0",
         trt_engine_cache_enable,
-        modelDir,
+        cachePath,
         trt_engine_cache_enable,
-        modelDir,
+        cachePath,
         trt_dump_ep_context_model
       };
+
+      if (isModelDirWriteable) {
+        keys.emplace_back("trt_ep_context_file_path");
+        values.emplace_back(cachePath);
+      }
       g_info("onnxruntime_subplugin::setAccelerator tensorrt: trt_engine_cache_path=%s trt_engine_cache_enable=%s trt_dump_ep_context_model=%s TensorRT options on sessionOptions",
         modelDir,
         trt_engine_cache_enable,
         trt_dump_ep_context_model);
+
       // this implicitly sets "has_user_compute_stream"
       Ort::ThrowOnError(api.UpdateTensorRTProviderOptionsWithValue(options, "user_compute_stream", cudaStream));
 
