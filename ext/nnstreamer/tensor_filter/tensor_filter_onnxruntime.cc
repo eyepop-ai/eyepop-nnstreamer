@@ -119,8 +119,14 @@ static gboolean cudaMemcpy_initialized = FALSE;
 
 static void init_cudaMemcpy() {
   if (!cudaMemcpy_initialized) {
-    GModule *cuda_module = g_module_open("libcudart.so.12", static_cast<GModuleFlags> (0));
-    if (cuda_module) {
+    GModule *cuda_module = g_module_open("libcudart.so.13", static_cast<GModuleFlags> (0));
+    if (cuda_module == nullptr) {
+      g_info("libcudart.so.13 not found, trying libcudart.so.12");
+      cuda_module = g_module_open("libcudart.so.12", static_cast<GModuleFlags> (0));
+    }
+    if (cuda_module == nullptr) {
+      g_warning("libcudart.so.13 and libcudart.so.12 not found");
+    } else {
       if (!g_module_symbol(
               cuda_module,
               "cudaMalloc",
