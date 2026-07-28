@@ -14,14 +14,13 @@
  *
  * This is the per-NN-framework plugin (onnxruntime) for tensor_filter.
  *
- * @todo Only float32 is allowed for input/output. Other types are NYI.
- * @todo Only CPU is supported. GPU and other hardware support is NYI.
  */
 
 #include <set>
 #include <string>
 #include <chrono>
 #include <optional>
+#include <numeric>
 
 #include <glib.h>
 #include <gmodule.h>
@@ -196,12 +195,7 @@ struct CudaMemoryDeleter {
   const Ort::Allocator* alloc_;
 };
 
-static gboolean ortOptions_initialized = FALSE;
-static OrtLoggingLevel ortOption_log_level = ORT_LOGGING_LEVEL_WARNING;
-static std::vector<std::pair<std::string, std::string>> ortOptions_provider_options;
-static std::vector<std::pair<std::string, std::string>> ortOptions_config_entries;
-
-#define ORT_LOG_LEVEL "V"
+#define ORT_LOG_LEVEL "ORT_LOG_LEVEL"
 #define ORT_PROVIDER_OPTION_ENV_PREFIX "ORT_PROVIDER_OPTION_"
 #define ORT_CONFIG_ENTRY_ENV_PREFIX "ORT_CONFIG_ENTRY_"
 
@@ -219,54 +213,20 @@ static gboolean str_has_prefix_case_insensitive(const gchar *str, const gchar *p
   return g_ascii_strncasecmp(str, prefix, prefix_len) == 0;
 }
 
-static void init_ortOptions() {
-  if (ortOptions_initialized) {
-    return;
-  }
-
-  gchar **envp = g_get_environ();
-  for (gchar **env = envp; *env; env++) {
-    gchar **name_value = g_strsplit(*env, "=", 2);
-    if (g_ascii_strcasecmp(name_value[0], ORT_LOG_LEVEL) == 0) {
-      const gchar* log_level_string = name_value[1];
-      g_info("init_ortOptions log level %s=%s", name_value[0], log_level_string);
-      if (log_level_string) {
-        if (g_ascii_strcasecmp(log_level_string, "FATAL") == 0) {
-          ortOption_log_level = ORT_LOGGING_LEVEL_FATAL;
-        } else if (g_ascii_strcasecmp(log_level_string, "ERROR") == 0) {
-          ortOption_log_level = ORT_LOGGING_LEVEL_ERROR;
-        } else if (g_ascii_strcasecmp(log_level_string, "WARNING") == 0) {
-          ortOption_log_level = ORT_LOGGING_LEVEL_WARNING;
-        } else if (g_ascii_strcasecmp(log_level_string, "INFO") == 0) {
-          ortOption_log_level = ORT_LOGGING_LEVEL_INFO;
-        } else if (g_ascii_strcasecmp(log_level_string, "VERBOSE") == 0) {
-          ortOption_log_level = ORT_LOGGING_LEVEL_VERBOSE;
-        }
-      }
-    } else if (str_has_prefix_case_insensitive(name_value[0], ORT_PROVIDER_OPTION_ENV_PREFIX)) {
-      const gchar *key = name_value[0] + strlen(ORT_PROVIDER_OPTION_ENV_PREFIX);
-      const gchar* value = name_value[1];
-      g_info("init_ortOptions options %s %s=%s", name_value[0], key, value);
-      ortOptions_provider_options.emplace_back(key, value);
-    } else if (str_has_prefix_case_insensitive(name_value[0], ORT_CONFIG_ENTRY_ENV_PREFIX)) {
-      const gchar *key = name_value[0] + strlen(ORT_CONFIG_ENTRY_ENV_PREFIX);
-      const gchar* value = name_value[1];
-      g_info("init_ortOptions config %s %s=%s", name_value[0], key, value);
-      ortOptions_config_entries.emplace_back(key, value);
-    }
-    g_strfreev(name_value);
-  }
-  g_strfreev(envp);
-
-  ortOptions_initialized = TRUE;
-}
 
 static const gchar *onnx_accl_support[] = { ACCL_CPU_STR, ACCL_GPU_STR, ACCL_NPU_STR, nullptr };
 
 /** @brief tensor-filter-subplugin concrete class for onnxruntime */
 class onnxruntime_subplugin final : public tensor_filter_subplugin
 {
+
   private:
+  void init_ortOptions();
+  gboolean ortOptions_initialized;
+  OrtLoggingLevel ortOption_log_level;
+  std::vector<std::pair<std::string, std::string>> ortOptions_provider_options;
+  std::vector<std::pair<std::string, std::string>> ortOptions_config_entries;
+
   /**
    * @brief Internal data structure for tensor information from ONNX.
    */
@@ -360,12 +320,13 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   int convertElementDataType (tensor_type type, ONNXTensorElementDataType &_type);
 };
 
-
 /**
  * @brief Constructor for onnxruntime_subplugin.
  */
 onnxruntime_subplugin::onnxruntime_subplugin ()
-    : configured{ false }, model_path{ nullptr },
+    : ortOptions_initialized { false },
+      ortOption_log_level { ORT_LOGGING_LEVEL_WARNING },
+      configured{ false }, model_path{ nullptr },
       filter_props{ nullptr },
       sessionOptions{ nullptr },
       fallbackSessionOptions{ nullptr },
@@ -415,6 +376,48 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
 onnxruntime_subplugin::~onnxruntime_subplugin ()
 {
   cleanup ();
+}
+
+void onnxruntime_subplugin::init_ortOptions() {
+  if (ortOptions_initialized) {
+    return;
+  }
+
+  gchar **envp = g_get_environ();
+  for (gchar **env_var = envp; *env_var; env_var++) {
+    gchar **name_value = g_strsplit(*env_var, "=", 2);
+    if (g_ascii_strcasecmp(name_value[0], ORT_LOG_LEVEL) == 0) {
+      const gchar* log_level_string = name_value[1];
+      g_info("init_ortOptions log level %s=%s", name_value[0], log_level_string);
+      if (log_level_string) {
+        if (g_ascii_strcasecmp(log_level_string, "FATAL") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_FATAL;
+        } else if (g_ascii_strcasecmp(log_level_string, "ERROR") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_ERROR;
+        } else if (g_ascii_strcasecmp(log_level_string, "WARNING") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_WARNING;
+        } else if (g_ascii_strcasecmp(log_level_string, "INFO") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_INFO;
+        } else if (g_ascii_strcasecmp(log_level_string, "VERBOSE") == 0) {
+          ortOption_log_level = ORT_LOGGING_LEVEL_VERBOSE;
+        }
+      }
+    } else if (str_has_prefix_case_insensitive(name_value[0], ORT_PROVIDER_OPTION_ENV_PREFIX)) {
+      const gchar *key = name_value[0] + strlen(ORT_PROVIDER_OPTION_ENV_PREFIX);
+      const gchar* value = name_value[1];
+      g_info("init_ortOptions options %s %s=%s", name_value[0], key, value);
+      ortOptions_provider_options.emplace_back(key, value);
+    } else if (str_has_prefix_case_insensitive(name_value[0], ORT_CONFIG_ENTRY_ENV_PREFIX)) {
+      const gchar *key = name_value[0] + strlen(ORT_CONFIG_ENTRY_ENV_PREFIX);
+      const gchar* value = name_value[1];
+      g_info("init_ortOptions config %s %s=%s", name_value[0], key, value);
+      ortOptions_config_entries.emplace_back(key, value);
+    }
+    g_strfreev(name_value);
+  }
+  g_strfreev(envp);
+
+  ortOptions_initialized = TRUE;
 }
 
 /** @brief cleanup resources used by onnxruntime subplugin */
@@ -843,16 +846,25 @@ onnxruntime_subplugin::createTensorRtOptions (
   const gchar *trt_fp16_enable = "1";
   const gchar *trt_int8_enable = "0";
   const gchar *trt_engine_cache_enable = "1";
-
-  for (const auto &o : ortOptions_provider_options) {
-    if (o.first == "trt_fp16_enable") {
-      trt_fp16_enable = o.second.c_str ();
-    } else if (o.first == "trt_int8_enable") {
-      trt_int8_enable = o.second.c_str ();
+  const gchar *trt_dump_ep_context_model = "0";
+  const gchar *trt_ep_context_file_path = nullptr;
+  const gchar *trt_engine_cache_path = isModelDirWriteable ? modelDir : g_get_tmp_dir ();
+  init_ortOptions();
+  for (auto iter = ortOptions_provider_options.begin(); iter != ortOptions_provider_options.end(); iter++) {
+    if (iter->first.compare("trt_fp16_enable") == 0) {
+      trt_fp16_enable = iter->second.c_str ();
+    } else if (iter->first.compare("trt_int8_enable") == 0) {
+      trt_int8_enable = iter->second.c_str ();
+    } else if (iter->first.compare("trt_dump_ep_context_model") == 0) {
+      trt_dump_ep_context_model = iter->second.c_str ();
+      g_warning("TENSORRT trt_dump_ep_context_model=%s (%lu)", trt_dump_ep_context_model, g_ascii_strtoull(trt_dump_ep_context_model, nullptr, 10));
+    } else if (iter->first.compare("trt_ep_context_file_path") == 0) {
+      trt_ep_context_file_path = iter->second.c_str ();
+    } else if (iter->first.compare("trt_engine_cache_path") == 0) {
+      trt_engine_cache_path = iter->second.c_str ();
     }
   }
 
-  const gchar *cachePath = isModelDirWriteable ? modelDir : g_get_tmp_dir ();
   std::vector<const char *> keys{
     "device_id",
     "trt_onnx_model_folder_path",
@@ -872,13 +884,33 @@ onnxruntime_subplugin::createTensorRtOptions (
     trt_fp16_enable,
     trt_int8_enable,
     trt_engine_cache_enable,
-    cachePath,
+    trt_engine_cache_path,
     trt_engine_cache_enable,
-    cachePath,
+    trt_engine_cache_path,
   };
+
+  gchar *file_path = nullptr;
+  if (g_ascii_strtoull(trt_dump_ep_context_model, nullptr, 10) > 0) {
+    if (trt_ep_context_file_path == nullptr) {
+      gchar *model_name = g_path_get_basename(model_path);
+      if (g_str_has_suffix(model_name, ".onnx")) {
+        file_path = g_strdup_printf("%.*s_context.onnx", (int)(strlen(model_name)-strlen(".onnx")), model_name);
+      } else {
+        file_path = g_strdup_printf("%s.context", model_name);
+      }
+      g_free(model_name);
+      trt_ep_context_file_path = file_path;
+    }
+    keys.emplace_back("trt_dump_ep_context_model");
+    keys.emplace_back("trt_ep_context_file_path");
+    values.emplace_back(trt_dump_ep_context_model);
+    values.emplace_back(trt_ep_context_file_path);
+  }
 
   Ort::ThrowOnError (api.UpdateTensorRTProviderOptions (
       options, keys.data (), values.data (), keys.size ()));
+
+  g_free(file_path);
 
   // this implicitly sets "has_user_compute_stream"
   Ort::ThrowOnError (api.UpdateTensorRTProviderOptionsWithValue (
@@ -993,8 +1025,8 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     sessionOptions = Ort::SessionOptions();
     std::unordered_map<std::string, std::string> options;
     options["backend_type"] = "htp";
-    for (const auto& o : ortOptions_provider_options) {
-      options[o.first] = o.second;
+    for (auto iter = ortOptions_provider_options.begin(); iter != ortOptions_provider_options.end(); iter++) {
+      options[iter->first] = iter->second;
     }
     sessionOptions.AppendExecutionProvider("QNN");
     g_info("onnxruntime_subplugin::setAccelerator qnn");
@@ -1011,8 +1043,8 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     std::unordered_map<std::string, std::string> options;
     options["device_type"] = "GPU";
     options["enable_qdq_optimizer"] = "True";
-    for (const auto& o : ortOptions_provider_options) {
-      options[o.first] = o.second;
+    for (auto iter = ortOptions_provider_options.begin(); iter != ortOptions_provider_options.end(); iter++) {
+      options[iter->first] = iter->second;
     }
     sessionOptions.AppendExecutionProvider_OpenVINO_V2(options);
     g_info("onnxruntime_subplugin::setAccelerator openvino");
