@@ -1028,7 +1028,7 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
     for (auto iter = ortOptions_provider_options.begin(); iter != ortOptions_provider_options.end(); iter++) {
       options[iter->first] = iter->second;
     }
-    sessionOptions.AppendExecutionProvider("QNN");
+    sessionOptions.AppendExecutionProvider("QNN", options);
     g_info("onnxruntime_subplugin::setAccelerator qnn");
   } else if (has_rocm && (use_accelerator & ACCL_GPU)) {
     sessionOptions = Ort::SessionOptions();
