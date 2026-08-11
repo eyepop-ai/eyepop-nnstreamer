@@ -37,6 +37,7 @@
 #define G_LOG_DOMAIN "eyepop-ai"
 
 #include <onnxruntime_cxx_api.h>
+#include <onnxruntime_session_options_config_keys.h>
 
 namespace nnstreamer
 {
@@ -940,6 +941,16 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
 
     sessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     fallbackSessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    // ORT's Level-1 WeightBiasQuantization transformer rewrites every fp32 Conv/ConvTranspose/Gemm
+    // bias that sits in a QDQ node unit to Cast(int32) -> DequantizeLinear before the graph is
+    // partitioned to the EP. TensorRT's IDequantizeLayer accepts only INT8/FP8/INT4/FP4, so an int8
+    // QDQ model whose biases are intentionally fp32 (nvidia-modelopt's explicit-precision output)
+    // fails engine generation with "Invalid Node - <conv>_bias_dq". QNN HTP wants those int32
+    // biases, so only the TensorRT path opts out; an ORT_CONFIG_ENTRY_* env var can still override
+    // it on sessionOptions below.
+    sessionOptions.AddConfigEntry(kOrtSessionOptionsDisableSpecifiedOptimizers, "WeightBiasQuantization");
+    fallbackSessionOptions.AddConfigEntry(kOrtSessionOptionsDisableSpecifiedOptimizers, "WeightBiasQuantization");
 
     {
       gchar *modelDir = g_path_get_dirname(model_path);
