@@ -1066,6 +1066,14 @@ onnxruntime_subplugin::setAccelerator (const char *accelerators, bool invoke_dyn
   }
   for (const auto& entry : ortOptions_config_entries) {
     sessionOptions.AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+    if (fallbackSessionOptions) {
+      fallbackSessionOptions.AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+    }
+  }
+  // BUG-270: onnxruntime 1.27.x ConstantFolding optimizer seems to produce wrong results
+  sessionOptions.AddConfigEntry(kOrtSessionOptionsConstantFoldingMaxOutputSizeInBytes, "0");
+  if (fallbackSessionOptions) {
+    fallbackSessionOptions.AddConfigEntry(kOrtSessionOptionsConstantFoldingMaxOutputSizeInBytes, "0");
   }
 }
 
