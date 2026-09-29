@@ -1157,6 +1157,10 @@ make_spec (const SessionPlan &plan, const std::string &file_identity)
                          + "|" + plan.io_contract);
   spec.concurrency = plan.concurrency ();
   spec.device = plan.use_cuda () ? plan.device : -1;
+  if (plan.graph) {
+    /* ORT captures on the first Run() of a thread (CUDA EP) or after one warm-up run (TensorRT) */
+    spec.serialized_warmup_runs = plan.ep == OrtEp::Tensorrt ? 3 : 2;
+  }
   spec.create = [plan] () -> std::unique_ptr<Replica> { return std::make_unique<OrtReplica> (plan); };
   spec.host_bytes = [path = plan.model_path] () { return model_file_bytes (path); };
   return spec;

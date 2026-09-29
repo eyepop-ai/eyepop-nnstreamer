@@ -79,6 +79,12 @@ struct ReplicaSpec {
   SessionKey key;
   Concurrency concurrency = Concurrency::Unbounded;
   int device = -1; /**< device whose memory is measured around creation; -1 = host */
+  /**
+   * @brief Runs per replica and thread that hold the device lock. CUDA graph capture
+   * (global capture mode) breaks if another thread creates or destroys a session, or
+   * captures, meanwhile; the CUDA EP captures per thread, TensorRT after a warm-up run.
+   */
+  unsigned serialized_warmup_runs = 0;
   std::function<std::unique_ptr<Replica> ()> create; /**< may throw */
   std::function<uint64_t ()> host_bytes; /**< size estimate when no device probe applies; optional */
 };
@@ -132,6 +138,7 @@ class Lease
   std::shared_ptr<Entry> entry_;
   ReplicaSlot *slot_ = nullptr;
   bool first_use_ = false;
+  bool serialize_ = false;
 };
 
 /** @brief A consumer's reference to an Entry; keeps the Entry alive. */
@@ -219,7 +226,6 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
 
   mutable std::mutex cache_mu_; /**< guards entries_; taken before any Entry mutex */
   std::unordered_map<SessionKey, std::shared_ptr<Entry>, SessionKeyHash> entries_;
-  std::mutex measure_mu_; /**< serializes measured replica creation and first runs */
 
   std::atomic<uint64_t> clock_{ 0 };
   std::atomic<uint64_t> sessions_created_{ 0 };

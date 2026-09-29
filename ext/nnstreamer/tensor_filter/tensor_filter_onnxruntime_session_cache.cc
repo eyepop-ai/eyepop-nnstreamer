@@ -3,8 +3,9 @@
  * @file    tensor_filter_onnxruntime_session_cache.cc
  * @brief   Shares onnxruntime sessions between tensor_filter instances.
  *
- * Lock order: cache_mu_ before any Entry::mu. measure_mu_ is never held
- * together with either; it only wraps replica creation and first runs.
+ * Lock order: cache_mu_ before any Entry::mu. A device lock is never held
+ * together with either; it wraps creating and destroying device replicas and
+ * their first runs, process-wide, since a device is shared by every cache.
  */
 
 #include "tensor_filter_onnxruntime_session_cache.hh"
@@ -28,11 +29,42 @@ namespace tensor_filter_onnxruntime
 
 struct ReplicaSlot {
   std::unique_ptr<Replica> replica;
+  int device = -1;
   unsigned leases = 0;
   uint64_t last_used = 0;
   uint64_t bytes = 0;
   bool used = false; /**< a lease was handed out; the first one is measured */
+  std::vector<std::pair<std::thread::id, unsigned>> runs_by_thread; /**< only with serialized warm-up */
+
+  unsigned *runs_of (std::thread::id thread)
+  {
+    for (auto &runs : runs_by_thread)
+      if (runs.first == thread)
+        return &runs.second;
+    return nullptr;
+  }
 };
+
+/** @brief The lock of a device, shared by every cache of the process. */
+static std::mutex &
+device_mutex (int device)
+{
+  static std::mutex mutexes[16];
+  return mutexes[static_cast<unsigned> (device) % 16];
+}
+
+/** @brief Destroys slots; device replicas under their device lock. */
+static void
+destroy_slots (std::vector<std::unique_ptr<ReplicaSlot>> &slots)
+{
+  for (auto &slot : slots) {
+    if (slot && slot->device >= 0) {
+      std::lock_guard<std::mutex> lock (device_mutex (slot->device));
+      slot.reset ();
+    }
+  }
+  slots.clear ();
+}
 
 class Entry
 {
@@ -81,7 +113,7 @@ SessionKey::SessionKey (std::string canonical_)
 
 Lease::Lease (Lease &&other) noexcept
     : cache_ (std::move (other.cache_)), entry_ (std::move (other.entry_)),
-      slot_ (other.slot_), first_use_ (other.first_use_)
+      slot_ (other.slot_), first_use_ (other.first_use_), serialize_ (other.serialize_)
 {
   other.slot_ = nullptr;
 }
@@ -95,6 +127,7 @@ Lease::operator= (Lease &&other) noexcept
     entry_ = std::move (other.entry_);
     slot_ = other.slot_;
     first_use_ = other.first_use_;
+    serialize_ = other.serialize_;
     other.slot_ = nullptr;
   }
   return *this;
@@ -308,12 +341,13 @@ SessionCache::build (const ReplicaSpec &spec)
 {
   auto slot = std::make_unique<ReplicaSlot> ();
   bool measured = false;
+  slot->device = spec.device;
 
-  if (spec.device >= 0 && probe_) {
-    std::lock_guard<std::mutex> lock (measure_mu_);
-    std::optional<uint64_t> before = probe_ (spec.device);
+  if (spec.device >= 0) {
+    std::lock_guard<std::mutex> lock (device_mutex (spec.device));
+    std::optional<uint64_t> before = probe_ ? probe_ (spec.device) : std::nullopt;
     slot->replica = spec.create ();
-    std::optional<uint64_t> after = probe_ (spec.device);
+    std::optional<uint64_t> after = probe_ ? probe_ (spec.device) : std::nullopt;
     if (before && after) {
       measured = true;
       slot->bytes = *after > *before ? *after - *before : 0;
@@ -354,7 +388,9 @@ SessionCache::grow_async (const std::shared_ptr<Entry> &entry)
       entry->cv.notify_all ();
     }
     if (discard) {
-      discard.reset ();
+      std::vector<std::unique_ptr<ReplicaSlot>> slots;
+      slots.push_back (std::move (discard));
+      destroy_slots (slots);
       self->sessions_destroyed_++;
     }
     self->evict ();
@@ -398,10 +434,19 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
         if (!pick || slot->leases < pick->leases)
           pick = slot.get ();
     } else {
-      /* the most recently used free replica, so surplus replicas age out */
-      for (auto &slot : entry->replicas)
-        if (slot->leases == 0 && (!pick || slot->last_used > pick->last_used))
+      /* a free replica this thread already warmed up (no new graph capture), then the
+       * most recently used one, so surplus replicas age out */
+      const std::thread::id self = std::this_thread::get_id ();
+      bool pick_warm = false;
+      for (auto &slot : entry->replicas) {
+        if (slot->leases > 0)
+          continue;
+        bool warm = slot->runs_of (self) != nullptr;
+        if (!pick || (warm && !pick_warm) || (warm == pick_warm && slot->last_used > pick->last_used)) {
           pick = slot.get ();
+          pick_warm = warm;
+        }
+      }
     }
 
     if (pick) {
@@ -413,6 +458,14 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
       lease.slot_ = pick;
       lease.first_use_ = !pick->used;
       pick->used = true;
+      if (entry->spec.serialized_warmup_runs > 0) {
+        unsigned *runs = pick->runs_of (std::this_thread::get_id ());
+        if (!runs) {
+          pick->runs_by_thread.emplace_back (std::this_thread::get_id (), 0);
+          runs = &pick->runs_by_thread.back ().second;
+        }
+        lease.serialize_ = (*runs)++ < entry->spec.serialized_warmup_runs;
+      }
       return lease;
     }
 
@@ -451,7 +504,9 @@ SessionCache::return_lease (Lease &lease)
     entry->cv.notify_all ();
   }
   if (discard) {
-    discard.reset ();
+    std::vector<std::unique_ptr<ReplicaSlot>> slots;
+    slots.push_back (std::move (discard));
+    destroy_slots (slots);
     sessions_destroyed_++;
   }
 }
@@ -460,18 +515,20 @@ void
 SessionCache::run_measured (Lease &lease, const std::function<void ()> &fn)
 {
   const ReplicaSpec &spec = lease.entry_->spec;
-  if (!lease.first_use_ || spec.device < 0 || !probe_) {
+  const bool measure = lease.first_use_ && probe_;
+  if (spec.device < 0 || !(measure || lease.serialize_)) {
     fn ();
     return;
   }
   lease.first_use_ = false;
+  lease.serialize_ = false;
 
   uint64_t grown = 0;
   {
-    std::lock_guard<std::mutex> lock (measure_mu_);
-    std::optional<uint64_t> before = probe_ (spec.device);
+    std::lock_guard<std::mutex> lock (device_mutex (spec.device));
+    std::optional<uint64_t> before = measure ? probe_ (spec.device) : std::nullopt;
     fn ();
-    std::optional<uint64_t> after = probe_ (spec.device);
+    std::optional<uint64_t> after = measure ? probe_ (spec.device) : std::nullopt;
     if (before && after && *after > *before)
       grown = *after - *before;
   }
@@ -562,7 +619,7 @@ SessionCache::poison (const std::shared_ptr<Entry> &entry, const ReplicaSpec &fa
     add_consumer (to);
   }
   sessions_destroyed_ += discard.size ();
-  discard.clear ();
+  destroy_slots (discard);
   evict ();
   return to;
 }
@@ -654,7 +711,7 @@ SessionCache::evict ()
   }
   evictions_ += evicted;
   sessions_destroyed_ += victims.size ();
-  victims.clear ();
+  destroy_slots (victims);
 }
 
 CacheStats

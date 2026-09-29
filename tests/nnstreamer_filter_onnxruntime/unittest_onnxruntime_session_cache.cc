@@ -466,6 +466,78 @@ TEST (onnxruntimeSessionCache, exclusiveReplicasAreNeverSharedUnderStress)
   EXPECT_EQ (stats.consumers, 0u);
 }
 
+TEST (onnxruntimeSessionCache, warmupRunsNeverOverlapCreationOrEachOther)
+{
+  FakeFactory factory;
+  std::atomic<int> critical{ 0 };
+  std::atomic<int> overlaps{ 0 };
+  std::atomic<int> serialized_runs{ 0 };
+  auto enter = [&] () {
+    if (critical.fetch_add (1) != 0)
+      overlaps++;
+    std::this_thread::sleep_for (2ms);
+    critical.fetch_sub (1);
+  };
+
+  auto cache = SessionCache::create (lru (0, 0, 4), factory.probe ());
+  auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
+  spec.serialized_warmup_runs = 2;
+  auto create = spec.create;
+  spec.create = [&, create] () {
+    enter ();
+    return create ();
+  };
+
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 6; t++) {
+    threads.emplace_back ([&] () {
+      EntryRef ref = cache->acquire (spec);
+      for (int i = 0; i < 20; i++) {
+        Lease lease = ref.lease ();
+        bool warmup = i < 2;
+        lease.run ([&] () {
+          if (warmup) {
+            serialized_runs++;
+            enter ();
+          }
+        });
+      }
+    });
+  }
+  for (auto &thread : threads)
+    thread.join ();
+  EXPECT_TRUE (wait_for_replicas (cache, cache->stats ().replicas));
+
+  EXPECT_EQ (overlaps, 0);
+  EXPECT_GE (serialized_runs, 12);
+}
+
+TEST (onnxruntimeSessionCache, threadGetsBackTheReplicaItWarmedUp)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (0, 0, 2));
+  auto spec = factory.spec ("graph", Concurrency::Exclusive);
+  spec.serialized_warmup_runs = 1;
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+
+  Lease la = a.lease ();
+  int mine = replica_id (la);
+  auto other = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  int theirs = other.get ();
+  EXPECT_NE (mine, theirs);
+  la.release ();
+
+  /* the other thread's replica was used last, but this thread warmed up its own */
+  for (int i = 0; i < 5; i++) {
+    Lease again = a.lease ();
+    EXPECT_EQ (replica_id (again), mine);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
