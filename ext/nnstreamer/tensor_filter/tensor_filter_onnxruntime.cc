@@ -494,7 +494,6 @@ OrtReplica::createSessionOptions (const SessionPlan &plan)
 {
   Ort::SessionOptions sessionOptions;
   auto api = Ort::GetApi();
-  auto cudaStreamAsString = std::to_string(reinterpret_cast<unsigned long>(cudaStream));
   auto device_id = std::to_string (plan.device);
 
   switch (plan.ep) {
@@ -524,9 +523,11 @@ OrtReplica::createSessionOptions (const SessionPlan &plan)
         // Standard CUDA provider for ops unsupported by TensorRT
         OrtCUDAProviderOptionsV2* options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&options));
-        std::vector<const char*> keys{"device_id", "enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
-        std::vector<const char*> values{device_id.c_str(), plan.graph ? "1" : "0", "HEURISTIC", cudaStreamAsString.c_str()};
+        std::vector<const char*> keys{"device_id", "enable_cuda_graph", "cudnn_conv_algo_search"};
+        std::vector<const char*> values{device_id.c_str(), plan.graph ? "1" : "0", "HEURISTIC"};
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
+        // as a pointer: given as a string, ORT runs every kernel on the legacy default stream
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptionsWithValue(options, "user_compute_stream", cudaStream));
         sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
         api.ReleaseCUDAProviderOptions(options);
         g_info("onnxruntime_subplugin::setAccelerator tensorrt: set %ld CUDA options", keys.size());
@@ -546,10 +547,14 @@ OrtReplica::createSessionOptions (const SessionPlan &plan)
         keys = {"device_id", "enable_cuda_graph", "cudnn_conv_algo_search"};
         values = {device_id.c_str(), "0", "HEURISTIC"};
       } else {
-        keys = {"device_id", "enable_cuda_graph", "cudnn_conv_algo_search", "user_compute_stream"};
-        values = {device_id.c_str(), "0", "HEURISTIC", cudaStreamAsString.c_str()};
+        keys = {"device_id", "enable_cuda_graph", "cudnn_conv_algo_search"};
+        values = {device_id.c_str(), "0", "HEURISTIC"};
       }
       Ort::ThrowOnError(api.UpdateCUDAProviderOptions(options, keys.data(), values.data(), keys.size()));
+      if (!plan.graph && !plan.shared) {
+        // as a pointer: given as a string, ORT runs every kernel on the legacy default stream
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptionsWithValue(options, "user_compute_stream", cudaStream));
+      }
       sessionOptions.AppendExecutionProvider_CUDA_V2(*options);
       api.ReleaseCUDAProviderOptions(options);
       g_info("onnxruntime_subplugin::setAccelerator cuda: set %ld CUDA options (graph=%d invoke_dynamic=%d)", keys.size(), plan.graph, plan.invoke_dynamic);
