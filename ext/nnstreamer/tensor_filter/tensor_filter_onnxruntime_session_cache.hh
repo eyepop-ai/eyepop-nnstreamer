@@ -9,8 +9,8 @@
  *  - an Unbounded replica serves any number of concurrent leases
  *    (EPs whose Run() is safe to call concurrently),
  *  - an Exclusive replica serves one lease at a time (EPs that serialize Run()
- *    or capture a CUDA graph); under contention the Entry grows another replica
- *    asynchronously, up to max_replicas_per_key.
+ *    or capture a CUDA graph), first come, first served; under contention the
+ *    Entry grows another replica asynchronously, up to max_replicas_per_key.
  * A consumer that finds its primary Entry broken (poisoned) is redirected to a
  * fallback Entry, and so is every later consumer of that key.
  *
@@ -42,7 +42,7 @@ struct CacheConfig {
   CacheStrategy strategy = CacheStrategy::Asap;
   uint64_t max_sessions = 0; /**< 0 = unlimited */
   uint64_t max_bytes = 0; /**< 0 = unlimited */
-  unsigned max_replicas_per_key = 2;
+  unsigned max_replicas_per_key = 1;
 };
 
 /** @brief Identity of a shareable session, hashed once when a consumer starts. */
@@ -128,6 +128,11 @@ class Lease
     return slot_ != nullptr;
   }
   Replica *replica () const;
+  /** @brief Whether the Entry had other consumers when this lease was handed out. */
+  bool contended () const
+  {
+    return contended_;
+  }
   /** @brief Runs fn; the first run of a replica is measured and added to its size. */
   void run (const std::function<void ()> &fn);
   void release ();
@@ -139,6 +144,7 @@ class Lease
   ReplicaSlot *slot_ = nullptr;
   bool first_use_ = false;
   bool serialize_ = false;
+  bool contended_ = false;
 };
 
 /** @brief A consumer's reference to an Entry; keeps the Entry alive. */

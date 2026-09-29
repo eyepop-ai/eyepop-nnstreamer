@@ -11,6 +11,7 @@
 #include "tensor_filter_onnxruntime_session_cache.hh"
 
 #include <algorithm>
+#include <deque>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -104,6 +105,8 @@ class Entry
   bool grow_failed = false; /**< an async grow failed; stop growing this Entry */
   bool poisoned = false;
   std::shared_ptr<Entry> redirect; /**< set with poisoned; written under cache_mu_ and mu */
+  std::deque<uint64_t> waiting; /**< tickets of consumers waiting for an exclusive replica, in arrival order */
+  uint64_t next_ticket = 0;
 
   std::unique_ptr<ReplicaSlot> take (ReplicaSlot *slot)
   {
@@ -135,7 +138,8 @@ SessionKey::SessionKey (std::string canonical_)
 
 Lease::Lease (Lease &&other) noexcept
     : cache_ (std::move (other.cache_)), entry_ (std::move (other.entry_)),
-      slot_ (other.slot_), first_use_ (other.first_use_), serialize_ (other.serialize_)
+      slot_ (other.slot_), first_use_ (other.first_use_), serialize_ (other.serialize_),
+      contended_ (other.contended_)
 {
   other.slot_ = nullptr;
 }
@@ -150,6 +154,7 @@ Lease::operator= (Lease &&other) noexcept
     slot_ = other.slot_;
     first_use_ = other.first_use_;
     serialize_ = other.serialize_;
+    contended_ = other.contended_;
     other.slot_ = nullptr;
   }
   return *this;
@@ -436,17 +441,34 @@ Lease
 SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry> &redirect)
 {
   const unsigned max_replicas = std::max (1u, config_.max_replicas_per_key);
+  const bool exclusive = entry->spec.concurrency == Concurrency::Exclusive;
   bool grow_requested = false;
   std::unique_lock<std::mutex> lock (entry->mu);
 
+  /* exclusive replicas are handed out first come, first served: a waiter holds a ticket,
+   * and a consumer that returns a replica while others wait goes to the back */
+  bool queued = false;
+  uint64_t ticket = 0;
+  auto dequeue = [&] () {
+    if (queued) {
+      entry->waiting.erase (std::find (entry->waiting.begin (), entry->waiting.end (), ticket));
+      queued = false;
+      entry->cv.notify_all ();
+    }
+  };
+
   for (;;) {
     if (entry->redirect) {
+      dequeue ();
       redirect = entry->redirect;
       return Lease ();
     }
 
+    const bool my_turn = !exclusive
+                         || (queued ? entry->waiting.front () == ticket : entry->waiting.empty ());
     ReplicaSlot *pick = nullptr;
-    if (entry->spec.concurrency == Concurrency::Unbounded) {
+    if (!my_turn) {
+    } else if (!exclusive) {
       for (auto &slot : entry->replicas)
         if (!pick || slot->leases < pick->leases)
           pick = slot.get ();
@@ -467,6 +489,12 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
     }
 
     if (pick) {
+      if (queued) {
+        entry->waiting.pop_front ();
+        queued = false;
+        /* the next in line may take another free replica */
+        entry->cv.notify_all ();
+      }
       pick->leases++;
       pick->last_used = tick ();
       Lease lease;
@@ -474,6 +502,7 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
       lease.entry_ = entry;
       lease.slot_ = pick;
       lease.first_use_ = !pick->used;
+      lease.contended_ = entry->consumers > 1;
       pick->used = true;
       if (entry->spec.serialized_warmup_runs > 0) {
         unsigned *runs = pick->runs_of (std::this_thread::get_id ());
@@ -486,14 +515,27 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
       return lease;
     }
 
+    if (exclusive && !queued) {
+      ticket = entry->next_ticket++;
+      entry->waiting.push_back (ticket);
+      queued = true;
+      continue;
+    }
+
     if (entry->replicas.empty () && entry->building == 0) {
       lock.unlock ();
-      ensure_replica (entry);
+      try {
+        ensure_replica (entry);
+      } catch (...) {
+        lock.lock ();
+        dequeue ();
+        throw;
+      }
       lock.lock ();
       continue;
     }
 
-    if (!grow_requested && entry->spec.concurrency == Concurrency::Exclusive
+    if (!grow_requested && exclusive
         && !entry->grow_failed && entry->replicas.size () + entry->building < max_replicas) {
       grow_requested = true;
       entry->building++;

@@ -360,6 +360,13 @@ class IoState
 
   void invoke (GstTensorFilterProperties *prop, const GstTensorMemory *input, GstTensorMemory *output);
 
+  /**
+   * @brief When set, static inputs are copied from and static outputs to these device
+   * buffers instead of host memory, so the host copies can happen outside a lease.
+   */
+  const void *const *deviceInputs = nullptr;
+  void *const *deviceOutputs = nullptr;
+
   private:
   void prepareInput (const GstTensorMemory *input, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time);
   void prepareOutput (GstTensorMemory *output, GstTensorFilterProperties *prop, std::chrono::nanoseconds &alloc_time, std::chrono::nanoseconds &copy_time);
@@ -843,7 +850,11 @@ IoState::prepareInput(
               cuda_memory, CudaMemoryDeleter (&allocator)));
         }
         TIME_IT([&] {
-          cudaMemcpyAsync_(inputDatas[i].get (), input[i].data, input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          if (deviceInputs) {
+            cudaMemcpyAsync_(inputDatas[i].get (), deviceInputs[i], input[i].size, cudaMemcpyDeviceToDevice_, cudaStream);
+          } else {
+            cudaMemcpyAsync_(inputDatas[i].get (), input[i].data, input[i].size, cudaMemcpyHostToDevice_, cudaStream);
+          }
           return nullptr;
         }, copy_time);
         // Create an OrtValue tensor backed by data on CUDA memory
@@ -1025,8 +1036,13 @@ IoState::postProcessOutput (
     size_t i;
     for (i = 0; i < outputTensors.size (); i++) {
       TIME_IT([&] {
-        cudaMemcpyAsync_(output[i].data, outputDatas[i].get (),
-          output[i].size, cudaMemcpyDeviceToHost_, cudaStream);
+        if (deviceOutputs) {
+          cudaMemcpyAsync_(deviceOutputs[i], outputDatas[i].get (),
+            output[i].size, cudaMemcpyDeviceToDevice_, cudaStream);
+        } else {
+          cudaMemcpyAsync_(output[i].data, outputDatas[i].get (),
+            output[i].size, cudaMemcpyDeviceToHost_, cudaStream);
+        }
         return nullptr;
       }, copy_time);
     }
@@ -1293,6 +1309,114 @@ nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxrunt
   return TRUE;
 }
 
+/** @brief Thread-local CUDA graph capture mode for a scope: allowed while another thread captures. */
+class ThreadLocalCaptureMode
+{
+  public:
+  ThreadLocalCaptureMode ()
+  {
+    cudaThreadExchangeStreamCaptureMode_ (&mode);
+  }
+  ~ThreadLocalCaptureMode ()
+  {
+    cudaThreadExchangeStreamCaptureMode_ (&mode);
+  }
+
+  private:
+  cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
+};
+
+/**
+ * @brief A consumer's own device copies of its static inputs and outputs. An exclusive
+ * replica is then leased only for device-to-device copies and the run; the host copies,
+ * most of an inference for large tensors, happen before and after the lease.
+ */
+class DeviceStaging
+{
+  public:
+  DeviceStaging () = default;
+  DeviceStaging (const DeviceStaging &) = delete;
+  DeviceStaging &operator= (const DeviceStaging &) = delete;
+
+  ~DeviceStaging ()
+  {
+    ThreadLocalCaptureMode capture;
+    for (void *buffer : inputs_)
+      cudaFree_ (buffer);
+    for (void *buffer : outputs_)
+      cudaFree_ (buffer);
+    if (stream)
+      cudaStreamDestroy_ (stream);
+  }
+
+  /** @brief Copies the inputs to the device and sizes the outputs; false if device memory is unavailable. */
+  bool upload (const GstTensorMemory *input, size_t inputs, const GstTensorMemory *output, size_t outputs)
+  {
+    ThreadLocalCaptureMode capture;
+    if (!stream && cudaStreamCreateWithFlags_ (&stream, cudaStreamNonBlocking_) != 0) {
+      stream = nullptr;
+      return false;
+    }
+    for (size_t i = 0; i < inputs; i++) {
+      if (!ensure (inputs_, inputSizes, i, input[i].size))
+        return false;
+      cudaMemcpyAsync_ (inputs_[i], input[i].data, input[i].size, cudaMemcpyHostToDevice_, stream);
+    }
+    for (size_t i = 0; i < outputs; i++) {
+      if (!ensure (outputs_, outputSizes, i, output[i].size))
+        return false;
+    }
+    cudaStreamSynchronize_ (stream);
+    return true;
+  }
+
+  /** @brief Copies the outputs back to the host. */
+  void download (GstTensorMemory *output, size_t outputs)
+  {
+    ThreadLocalCaptureMode capture;
+    for (size_t i = 0; i < outputs; i++) {
+      cudaMemcpyAsync_ (output[i].data, outputs_[i], output[i].size, cudaMemcpyDeviceToHost_, stream);
+    }
+    cudaStreamSynchronize_ (stream);
+  }
+
+  const void *const *inputs () const
+  {
+    return inputs_.data ();
+  }
+  void *const *outputs () const
+  {
+    return outputs_.data ();
+  }
+
+  private:
+  static bool ensure (std::vector<void *> &buffers, std::vector<size_t> &sizes, size_t index, size_t size)
+  {
+    if (buffers.size () <= index) {
+      buffers.resize (index + 1, nullptr);
+      sizes.resize (index + 1, 0);
+    }
+    if (buffers[index] && sizes[index] >= size)
+      return true;
+    if (buffers[index])
+      cudaFree_ (buffers[index]);
+    buffers[index] = nullptr;
+    sizes[index] = 0;
+    if (!cudaMalloc_ || cudaMalloc_ (&buffers[index], size) != 0) {
+      buffers[index] = nullptr;
+      return false;
+    }
+    sizes[index] = size;
+    return true;
+  }
+
+  std::vector<void *> inputs_;
+  std::vector<size_t> inputSizes;
+  std::vector<void *> outputs_;
+  std::vector<size_t> outputSizes;
+  cudaStream_t_ stream = nullptr;
+};
+
 /** @brief tensor-filter-subplugin concrete class for onnxruntime */
 class onnxruntime_subplugin final : public tensor_filter_subplugin
 {
@@ -1320,6 +1444,11 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   std::unique_ptr<IoState> consumer_io;
   const OrtReplica *consumer_io_replica;
 
+  /** @brief This consumer's device copies of its I/O, for exclusive replicas. */
+  std::unique_ptr<DeviceStaging> staging;
+  /** @brief Other consumers shared the entry at the last lease, so staging pays off. */
+  bool contended;
+
   static const char *name;
   static onnxruntime_subplugin *registeredRepresentation;
 
@@ -1327,6 +1456,8 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   void convertTensorInfo (const NodeInfo &node, GstTensorsInfo &info);
   int convertTensorDim (const std::vector<int64_t> &shapes, tensor_dim &dim, bool &is_dynamic);
   SessionPlan resolvePlan (const GstTensorFilterProperties *prop, bool shared);
+  void invokeOnce (GstTensorFilterProperties *prop,
+      const GstTensorMemory *input, GstTensorMemory *output);
   void invokeOn (Lease &lease, GstTensorFilterProperties *prop,
       const GstTensorMemory *input, GstTensorMemory *output);
 
@@ -1357,7 +1488,8 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_rocm{ false }, has_openvino{ false },
       has_accelerator{ ACCL_NONE },
       shared{ false },
-      consumer_io_replica{ nullptr }
+      consumer_io_replica{ nullptr },
+      contended{ false }
 {
   process_options ();
   std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
@@ -1400,6 +1532,7 @@ onnxruntime_subplugin::cleanup ()
   /* the binding belongs to a session of the entry, release it first */
   consumer_io.reset ();
   consumer_io_replica = nullptr;
+  staging.reset ();
   entry.reset ();
   cache.reset ();
   fallback.reset ();
@@ -1660,6 +1793,75 @@ onnxruntime_subplugin::invokeOn (Lease &lease, GstTensorFilterProperties *prop,
 }
 
 /**
+ * @brief Leases a replica and runs one inference. For static I/O on an exclusive CUDA
+ * replica, the host copies go through this consumer's device staging outside the lease.
+ */
+void
+onnxruntime_subplugin::invokeOnce (GstTensorFilterProperties *prop,
+    const GstTensorMemory *input, GstTensorMemory *output)
+{
+  const ReplicaSpec &spec = entry.spec ();
+  bool staged = contended && spec.concurrency == Concurrency::Exclusive && spec.device >= 0
+                && (prop == nullptr
+                    || (prop->input_meta.format == _NNS_TENSOR_FORMAT_STATIC
+                        && prop->output_meta.format == _NNS_TENSOR_FORMAT_STATIC
+                        && !prop->invoke_dynamic));
+#ifdef DEBUG_TIMING
+  auto upload_start = std::chrono::high_resolution_clock::now ();
+#endif
+  if (staged) {
+    if (!staging) {
+      staging = std::make_unique<DeviceStaging> ();
+    }
+    staged = staging->upload (input, inputNode.count, output, outputNode.count);
+  }
+#ifdef DEBUG_TIMING
+  auto lease_start = std::chrono::high_resolution_clock::now ();
+#endif
+  {
+    Lease lease = entry.lease ();
+#ifdef DEBUG_TIMING
+    g_warning ("lease wait for %s: %ld", model_path,
+        (long) std::chrono::duration_cast<std::chrono::nanoseconds> (
+            std::chrono::high_resolution_clock::now () - lease_start).count ());
+#endif
+    contended = lease.contended ();
+    IoState *io = static_cast<OrtReplica *> (lease.replica ())->io.get ();
+    if (staged && io) {
+      io->deviceInputs = staging->inputs ();
+      io->deviceOutputs = staging->outputs ();
+      try {
+        lease.run ([&] () { io->invoke (prop, input, output); });
+      } catch (...) {
+        io->deviceInputs = nullptr;
+        io->deviceOutputs = nullptr;
+        throw;
+      }
+      io->deviceInputs = nullptr;
+      io->deviceOutputs = nullptr;
+    } else {
+      /* redirected to a replica without its own binding */
+      staged = false;
+      invokeOn (lease, prop, input, output);
+    }
+  }
+#ifdef DEBUG_TIMING
+  auto download_start = std::chrono::high_resolution_clock::now ();
+#endif
+  if (staged) {
+    staging->download (output, outputNode.count);
+  }
+#ifdef DEBUG_TIMING
+  if (staged) {
+    auto end = std::chrono::high_resolution_clock::now ();
+    g_warning ("staging for %s: upload %ld download %ld", model_path,
+        (long) std::chrono::duration_cast<std::chrono::nanoseconds> (lease_start - upload_start).count (),
+        (long) std::chrono::duration_cast<std::chrono::nanoseconds> (end - download_start).count ());
+  }
+#endif
+}
+
+/**
  * @brief Method to execute the model with dynamic tensors.
  */
 void
@@ -1674,16 +1876,7 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
     throw std::runtime_error ("Invalid output buffer, it is NULL.");
 
   try {
-#ifdef DEBUG_TIMING
-    auto lease_start = std::chrono::high_resolution_clock::now ();
-#endif
-    Lease lease = entry.lease ();
-#ifdef DEBUG_TIMING
-    g_warning ("lease wait for %s: %ld", model_path,
-        (long) std::chrono::duration_cast<std::chrono::nanoseconds> (
-            std::chrono::high_resolution_clock::now () - lease_start).count ());
-#endif
-    invokeOn (lease, prop, input, output);
+    invokeOnce (prop, input, output);
   } catch (const Ort::Exception &exception) {
     if (fallback && entry.spec ().key == primary_key) {
       g_info ("ONNX provider error '%s' for %s, trying to use fallback session options",
@@ -1692,8 +1885,7 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
         consumer_io.reset ();
         consumer_io_replica = nullptr;
         entry.poison (*fallback);
-        Lease lease = entry.lease ();
-        invokeOn (lease, prop, input, output);
+        invokeOnce (prop, input, output);
       } catch (const Ort::Exception &exception) {
         const std::string err_msg
             = "ERROR running model inference: " + (std::string) exception.what ();

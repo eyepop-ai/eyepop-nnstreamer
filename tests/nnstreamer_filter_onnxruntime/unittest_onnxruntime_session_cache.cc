@@ -93,7 +93,20 @@ lru (uint64_t max_sessions = 0, uint64_t max_bytes = 0, unsigned max_replicas = 
   return config;
 }
 
+CacheConfig
+asap (unsigned max_replicas)
+{
+  CacheConfig config;
+  config.max_replicas_per_key = max_replicas;
+  return config;
+}
+
 } /* namespace */
+
+TEST (onnxruntimeSessionCache, defaultIsOneReplicaPerKey)
+{
+  EXPECT_EQ (CacheConfig{}.max_replicas_per_key, 1u);
+}
 
 TEST (onnxruntimeSessionCache, keyIsHashedOnce)
 {
@@ -253,7 +266,7 @@ TEST (onnxruntimeSessionCache, exclusiveGrowsAsynchronouslyUnderContention)
 {
   FakeFactory factory;
   factory.delay = 50ms;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (asap (2));
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -275,7 +288,7 @@ TEST (onnxruntimeSessionCache, exclusiveGrowsAsynchronouslyUnderContention)
 TEST (onnxruntimeSessionCache, contendedLeaseTakesAReturnedReplicaBeforeTheGrowFinishes)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (asap (2));
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -317,7 +330,7 @@ TEST (onnxruntimeSessionCache, exclusiveGrowthIsCapped)
 TEST (onnxruntimeSessionCache, failedGrowStopsGrowingThatKey)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (asap (2));
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -536,6 +549,62 @@ TEST (onnxruntimeSessionCache, threadGetsBackTheReplicaItWarmedUp)
     Lease again = a.lease ();
     EXPECT_EQ (replica_id (again), mine);
   }
+}
+
+TEST (onnxruntimeSessionCache, exclusiveLeasesAreFirstComeFirstServed)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+  EntryRef c = cache->acquire (spec);
+
+  std::mutex order_mu;
+  std::vector<char> order;
+  auto record = [&] (char who) {
+    std::lock_guard<std::mutex> lock (order_mu);
+    order.push_back (who);
+  };
+
+  Lease la = a.lease ();
+  auto tb = std::async (std::launch::async, [&] () {
+    Lease lb = b.lease ();
+    record ('b');
+  });
+  std::this_thread::sleep_for (50ms);
+  auto tc = std::async (std::launch::async, [&] () {
+    Lease lc = c.lease ();
+    record ('c');
+  });
+  std::this_thread::sleep_for (50ms);
+
+  /* a returns the replica while b and c wait, and asks again at once: it goes last */
+  la.release ();
+  la = a.lease ();
+  record ('a');
+  la.release ();
+  tb.get ();
+  tc.get ();
+
+  ASSERT_EQ (order.size (), 3u);
+  EXPECT_EQ (order[0], 'b');
+  EXPECT_EQ (order[1], 'c');
+  EXPECT_EQ (order[2], 'a');
+  EXPECT_EQ (factory.created, 1);
+}
+
+TEST (onnxruntimeSessionCache, leaseTellsWhetherTheEntryIsShared)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  EntryRef a = cache->acquire (spec);
+  EXPECT_FALSE (a.lease ().contended ());
+  EntryRef b = cache->acquire (spec);
+  EXPECT_TRUE (a.lease ().contended ());
+  b.reset ();
+  EXPECT_FALSE (a.lease ().contended ());
 }
 
 int

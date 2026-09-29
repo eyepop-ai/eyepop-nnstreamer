@@ -12,7 +12,7 @@
  *  - "strategy" (string, optional): "asap" (default) or "lru"
  *  - "max-sessions" (guint64, optional): lru limit on sessions, 0 = unlimited
  *  - "max-bytes" (guint64, optional): lru limit on session memory, 0 = unlimited
- *  - "max-replicas-per-key" (guint, optional): default 2
+ *  - "max-replicas-per-key" (guint, optional): default 1
  *
  * Without the context every tensor_filter keeps a private session.
  */
