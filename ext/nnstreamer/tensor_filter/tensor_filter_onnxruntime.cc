@@ -1089,7 +1089,7 @@ IoState::invoke (GstTensorFilterProperties *prop,
   }, total_time);
 
 #ifdef DEBUG_TIMING
-  std::chrono::nanoseconds unaccounted_time = total_time - (prepare_input_time + prepare_output_time + run_time + post_process_input_time + post_process_output_time) + sync_time;
+  std::chrono::nanoseconds unaccounted_time = total_time - (prepare_input_time + prepare_output_time + run_time + post_process_input_time + post_process_output_time + sync_time);
   g_warning("inference for %s - total: %ld alloc: %ld copy: %ld\n"
             "\t prepare_input: %ld\n"
             "\t prepare_output: %ld\n"
@@ -1674,7 +1674,15 @@ onnxruntime_subplugin::invoke_dynamic (GstTensorFilterProperties *prop,
     throw std::runtime_error ("Invalid output buffer, it is NULL.");
 
   try {
+#ifdef DEBUG_TIMING
+    auto lease_start = std::chrono::high_resolution_clock::now ();
+#endif
     Lease lease = entry.lease ();
+#ifdef DEBUG_TIMING
+    g_warning ("lease wait for %s: %ld", model_path,
+        (long) std::chrono::duration_cast<std::chrono::nanoseconds> (
+            std::chrono::high_resolution_clock::now () - lease_start).count ());
+#endif
     invokeOn (lease, prop, input, output);
   } catch (const Ort::Exception &exception) {
     if (fallback && entry.spec ().key == primary_key) {
