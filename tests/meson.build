@@ -417,6 +417,16 @@ if gtest_dep.found()
     )
 
     test('unittest_filter_onnxruntime', unittest_filter_onnxruntime, env: testenv)
+
+    unittest_onnxruntime_session_cache = executable('unittest_onnxruntime_session_cache',
+      join_paths('nnstreamer_filter_onnxruntime', 'unittest_onnxruntime_session_cache.cc'),
+      join_paths('..', 'ext', 'nnstreamer', 'tensor_filter', 'tensor_filter_onnxruntime_session_cache.cc'),
+      dependencies: [gtest_dep, glib_dep, thread_dep],
+      install: get_option('install-test'),
+      install_dir: unittest_install_dir
+    )
+
+    test('unittest_onnxruntime_session_cache', unittest_onnxruntime_session_cache, env: testenv)
   endif
 
   # Run unittest_trainer

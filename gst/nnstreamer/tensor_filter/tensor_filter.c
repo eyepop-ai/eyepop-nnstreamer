@@ -146,6 +146,8 @@ static gboolean gst_tensor_filter_transform_size (GstBaseTransform * trans,
     GstPadDirection direction, GstCaps * caps, gsize size,
     GstCaps * othercaps, gsize * othersize);
 static gboolean gst_tensor_filter_start (GstBaseTransform * trans);
+static void gst_tensor_filter_set_context (GstElement * element,
+    GstContext * context);
 static gboolean gst_tensor_filter_stop (GstBaseTransform * trans);
 static gboolean gst_tensor_filter_sink_event (GstBaseTransform * trans,
     GstEvent * event);
@@ -221,12 +223,84 @@ gst_tensor_filter_class_init (GstTensorFilterClass * klass)
   trans_class->sink_event = GST_DEBUG_FUNCPTR (gst_tensor_filter_sink_event);
   trans_class->src_event = GST_DEBUG_FUNCPTR (gst_tensor_filter_src_event);
 
+  gstelement_class->set_context =
+      GST_DEBUG_FUNCPTR (gst_tensor_filter_set_context);
+
   /* start/stop to call open/close */
   trans_class->start = GST_DEBUG_FUNCPTR (gst_tensor_filter_start);
   trans_class->stop = GST_DEBUG_FUNCPTR (gst_tensor_filter_stop);
 
   /* Queries */
   trans_class->query = GST_DEBUG_FUNCPTR (gst_tensor_filter_query);
+}
+
+/**
+ * @brief Looks up a GstContext of context_type on the element or its nearest ancestor.
+ * @return A new reference, or NULL.
+ */
+static void *
+gst_tensor_filter_get_context (void *context_owner, const char *context_type)
+{
+  GstObject *current;
+
+  g_return_val_if_fail (GST_IS_ELEMENT (context_owner), NULL);
+  g_return_val_if_fail (context_type != NULL, NULL);
+
+  current = gst_object_ref (GST_OBJECT (context_owner));
+  while (current) {
+    GstObject *parent;
+
+    if (GST_IS_ELEMENT (current)) {
+      GstContext *context =
+          gst_element_get_context (GST_ELEMENT (current), context_type);
+      if (context) {
+        gst_object_unref (current);
+        return context;
+      }
+    }
+    parent = gst_object_get_parent (current);
+    gst_object_unref (current);
+    current = parent;
+  }
+  return NULL;
+}
+
+/**
+ * @brief A context that arrives after the subplugin was opened (e.g. by caps
+ * queries while gst_parse links a pipeline, before the application could set
+ * its contexts) reopens the subplugin if the subplugin asks for it. Only before
+ * the element starts, so a running filter is never interrupted.
+ */
+static void
+gst_tensor_filter_set_context (GstElement * element, GstContext * context)
+{
+  GstTensorFilter *self = GST_TENSOR_FILTER (element);
+  GstTensorFilterPrivate *priv = &self->priv;
+  GstState state, pending;
+
+  GST_ELEMENT_CLASS (parent_class)->set_context (element, context);
+
+  GST_OBJECT_LOCK (self);
+  state = GST_STATE (self);
+  pending = GST_STATE_PENDING (self);
+  GST_OBJECT_UNLOCK (self);
+  if (state > GST_STATE_READY || pending > GST_STATE_READY)
+    return;
+
+  if (priv->prop.fw_opened && priv->fw && GST_TF_FW_V1 (priv->fw)
+      && priv->fw->eventHandler) {
+    GstTensorFilterFrameworkEventData data;
+    int status;
+
+    data.context_type = gst_context_get_context_type (context);
+    status = priv->fw->eventHandler (priv->fw, &priv->prop, priv->privateData,
+        SET_CONTEXT, &data);
+    if (status == 0) {
+      GST_INFO_OBJECT (self, "reopening %s for context %s",
+          GST_STR_NULL (priv->prop.fwname), data.context_type);
+      gst_tensor_filter_common_unload_fw (priv);
+    }
+  }
 }
 
 /**
@@ -241,6 +315,8 @@ gst_tensor_filter_init (GstTensorFilter * self)
   GstTensorFilterPrivate *priv = &self->priv;
 
   gst_tensor_filter_common_init_property (priv);
+  priv->prop.context_owner = self;
+  priv->prop.get_context = gst_tensor_filter_get_context;
   /* init qos properties */
   self->prev_ts = GST_CLOCK_TIME_NONE;
   self->throttling_delay = 0;
