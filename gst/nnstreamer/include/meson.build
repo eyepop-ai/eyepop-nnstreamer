@@ -13,6 +13,8 @@ nnstreamer_headers += files(
   'nnstreamer_plugin_api_converter.h',
   'nnstreamer_plugin_api_util.h',
   'nnstreamer_plugin_api.h',
+  'nnstreamer_onnxruntime_session_cache.h',
+  'nnstreamer_shared_slot.h',
   'nnstreamer_util.h'
 )
 

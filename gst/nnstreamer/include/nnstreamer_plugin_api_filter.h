@@ -138,6 +138,9 @@ typedef struct _GstTensorFilterProperties
   int invoke_dynamic; /**< True for supporting invoke with flexible output. */
 
   uint32_t suspend; /**< Timeout (ms) for suspend. (Unload the framework) */
+
+  void *context_owner; /**< The element that owns these properties, NULL outside a pipeline (e.g. single API). Pass it to get_context. */
+  void *(*get_context) (void *context_owner, const char *context_type); /**< Looks up a GstContext of context_type on context_owner or its nearest ancestor. Returns a new reference (unref with gst_context_unref) or NULL. NULL when there is no context_owner. */
 } GstTensorFilterProperties;
 
 /**
@@ -184,6 +187,7 @@ typedef enum
   SET_OUTPUT_PROP,  /**< Update output tensor info and layout */
   SET_ACCELERATOR,  /**< Update accelerator of the subplugin to be used as backend */
   CHECK_HW_AVAILABILITY, /**< Check the hw availability with custom option */
+  SET_CONTEXT,      /**< A GstContext arrived after the subplugin was opened. Return 0 to have it closed and opened again (with the context available) before the element starts. */
 } event_ops;
 
 /**
@@ -234,6 +238,11 @@ typedef struct _GstTensorFilterFrameworkEventData
     struct {
       accl_hw hw; /**< accelerator to check availability */
       const char *custom; /**< custom option for hardware detection */
+    };
+
+    /** for SET_CONTEXT event */
+    struct {
+      const char *context_type; /**< type of the GstContext that arrived */
     };
   };
 } GstTensorFilterFrameworkEventData;

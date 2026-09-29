@@ -48,6 +48,7 @@ nnstreamer_single_sources = [
   'nnstreamer_log.c',
   'nnstreamer_subplugin.c',
   'nnstreamer_plugin_api_util_impl.c',
+  'nnstreamer_shared_slot.c',
   'nnstreamer_watchdog.c'
 ]
 
