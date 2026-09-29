@@ -47,6 +47,7 @@ typedef struct
   uint64_t grows;
   uint64_t grow_failures;
   uint64_t poisons;
+  uint64_t grows_in_flight;
 } NnsOnnxruntimeSessionCacheStats;
 
 /**

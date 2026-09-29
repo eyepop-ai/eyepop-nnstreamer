@@ -3,15 +3,16 @@
  * @file    tensor_filter_onnxruntime_session_cache.cc
  * @brief   Shares onnxruntime sessions between tensor_filter instances.
  *
- * Lock order: cache_mu_ before any Entry::mu. A device lock is never held
- * together with either; it wraps creating and destroying device replicas and
- * their first runs, process-wide, since a device is shared by every cache.
+ * Lock order: cache_mu_ before any Entry::mu. A device lock (DeviceLocks) is
+ * never held together with either; it wraps creating and destroying device
+ * replicas and their first runs.
  */
 
 #include "tensor_filter_onnxruntime_session_cache.hh"
 
 #include <algorithm>
 #include <deque>
+#include <unordered_set>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -46,14 +47,6 @@ struct ReplicaSlot {
   }
 };
 
-/** @brief The lock of a device, shared by every cache of the process. */
-static std::mutex &
-device_mutex (int device)
-{
-  static std::mutex mutexes[16];
-  return mutexes[static_cast<unsigned> (device) % 16];
-}
-
 /** @brief Bytes a device gained around fn, if probe could measure both ends. */
 static bool
 measure_growth (const DeviceMemoryProbe &probe, int device, const std::function<void ()> &fn, uint64_t &grown)
@@ -77,12 +70,12 @@ measure_growth (const DeviceMemoryProbe &probe, int device, const std::function<
 }
 
 /** @brief Destroys slots; device replicas under their device lock. */
-static void
-destroy_slots (std::vector<std::unique_ptr<ReplicaSlot>> &slots)
+void
+SessionCache::destroy_slots (std::vector<std::unique_ptr<ReplicaSlot>> &slots)
 {
   for (auto &slot : slots) {
     if (slot && slot->device >= 0) {
-      std::lock_guard<std::mutex> lock (device_mutex (slot->device));
+      std::lock_guard<std::mutex> lock (device_locks_->of (slot->device));
       slot.reset ();
     }
   }
@@ -263,13 +256,18 @@ EntryRef::reset ()
 /* SessionCache */
 
 std::shared_ptr<SessionCache>
-SessionCache::create (const CacheConfig &config, DeviceMemoryProbe probe)
+SessionCache::create (const CacheConfig &config,
+    std::shared_ptr<DeviceLocks> device_locks, DeviceMemoryProbe probe)
 {
-  return std::shared_ptr<SessionCache> (new SessionCache (config, std::move (probe)));
+  if (!device_locks)
+    throw std::invalid_argument ("a session cache needs device locks");
+  return std::shared_ptr<SessionCache> (
+      new SessionCache (config, std::move (device_locks), std::move (probe)));
 }
 
-SessionCache::SessionCache (const CacheConfig &config, DeviceMemoryProbe probe)
-    : config_ (config), probe_ (std::move (probe))
+SessionCache::SessionCache (const CacheConfig &config,
+    std::shared_ptr<DeviceLocks> device_locks, DeviceMemoryProbe probe)
+    : config_ (config), device_locks_ (std::move (device_locks)), probe_ (std::move (probe))
 {
 }
 
@@ -371,7 +369,7 @@ SessionCache::build (const ReplicaSpec &spec)
   slot->device = spec.device;
 
   if (spec.device >= 0) {
-    std::lock_guard<std::mutex> lock (device_mutex (spec.device));
+    std::lock_guard<std::mutex> lock (device_locks_->of (spec.device));
     measured = measure_growth (probe_, spec.device,
         [&slot, &spec] () { slot->replica = spec.create (); }, slot->bytes);
   } else {
@@ -393,6 +391,7 @@ void
 SessionCache::grow_async (const std::shared_ptr<Entry> &entry)
 {
   grows_++;
+  grows_in_flight_++;
   auto finish = [] (const std::shared_ptr<SessionCache> &self,
                     const std::shared_ptr<Entry> &entry, std::unique_ptr<ReplicaSlot> slot) {
     std::unique_ptr<ReplicaSlot> discard;
@@ -412,10 +411,11 @@ SessionCache::grow_async (const std::shared_ptr<Entry> &entry)
     if (discard) {
       std::vector<std::unique_ptr<ReplicaSlot>> slots;
       slots.push_back (std::move (discard));
-      destroy_slots (slots);
+      self->destroy_slots (slots);
       self->sessions_destroyed_++;
     }
     self->evict ();
+    self->grows_in_flight_--;
   };
 
   std::shared_ptr<SessionCache> self = shared_from_this ();
@@ -584,7 +584,7 @@ SessionCache::run_measured (Lease &lease, const std::function<void ()> &fn)
 
   uint64_t grown = 0;
   {
-    std::lock_guard<std::mutex> lock (device_mutex (spec.device));
+    std::lock_guard<std::mutex> lock (device_locks_->of (spec.device));
     measure_growth (measure ? probe_ : DeviceMemoryProbe (), spec.device, fn, grown);
   }
   if (grown == 0)
@@ -735,12 +735,25 @@ SessionCache::evict ()
         overcommitted = true;
         break;
       }
+      /* the scan let go of the entry: it may have been leased or removed since */
       std::lock_guard<std::mutex> lock (victim_entry->mu);
+      if (victim->leases > 0)
+        continue;
+      uint64_t victim_bytes = victim->bytes;
+      std::unique_ptr<ReplicaSlot> taken = victim_entry->take (victim);
+      if (!taken)
+        continue;
       count--;
-      bytes -= victim->bytes;
-      victims.push_back (victim_entry->take (victim));
+      bytes -= victim_bytes;
+      victims.push_back (std::move (taken));
       evicted++;
     }
+
+    /* a poisoned entry keeps redirecting to its target, so the target stays */
+    std::unordered_set<const Entry *> redirect_targets;
+    for (auto &kv : entries_)
+      if (kv.second->redirect)
+        redirect_targets.insert (kv.second->redirect.get ());
 
     for (auto it = entries_.begin (); it != entries_.end ();) {
       Entry &entry = *it->second;
@@ -748,7 +761,7 @@ SessionCache::evict ()
       {
         std::lock_guard<std::mutex> lock (entry.mu);
         unused = !entry.poisoned && entry.consumers == 0 && entry.building == 0
-                 && entry.replicas.empty ();
+                 && entry.replicas.empty () && !redirect_targets.count (&entry);
       }
       /* erasing may destroy the Entry, so never while holding its mutex */
       if (unused)
@@ -794,6 +807,7 @@ SessionCache::stats () const
   stats.grows = grows_;
   stats.grow_failures = grow_failures_;
   stats.poisons = poisons_;
+  stats.grows_in_flight = grows_in_flight_;
   return stats;
 }
 

@@ -1187,6 +1187,19 @@ make_spec (const SessionPlan &plan, const std::string &file_identity)
   return spec;
 }
 
+/**
+ * @brief The device locks of the process. A GPU is shared by every session in the
+ * process: a CUDA graph capture breaks if any other session is created or destroyed
+ * on the device meanwhile, including private sessions of filters without a pipeline
+ * cache. So all caches, pipeline and private, get this one instance.
+ */
+static std::shared_ptr<DeviceLocks>
+process_device_locks ()
+{
+  static const std::shared_ptr<DeviceLocks> locks = std::make_shared<DeviceLocks> ();
+  return locks;
+}
+
 /** @brief Holds a pipeline's cache in its NnsSharedSlot. */
 struct SlotCache {
   std::shared_ptr<SessionCache> cache;
@@ -1214,7 +1227,7 @@ slot_cache_new (gpointer user_data)
           " max-bytes=%" G_GUINT64_FORMAT " max-replicas-per-key=%u",
       config.strategy == CacheStrategy::Lru ? "lru" : "asap",
       (guint64) config.max_sessions, (guint64) config.max_bytes, config.max_replicas_per_key);
-  return new SlotCache{ SessionCache::create (config, cuda_memory_used) };
+  return new SlotCache{ SessionCache::create (config, process_device_locks (), cuda_memory_used) };
 }
 
 static bool
@@ -1306,6 +1319,7 @@ nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxrunt
   stats->grows = s.grows;
   stats->grow_failures = s.grow_failures;
   stats->poisons = s.poisons;
+  stats->grows_in_flight = s.grows_in_flight;
   return TRUE;
 }
 
@@ -1732,7 +1746,7 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
   cache = pipeline_cache (prop);
   shared = cache != nullptr;
   if (!cache) {
-    cache = SessionCache::create (CacheConfig{}, cuda_memory_used);
+    cache = SessionCache::create (CacheConfig{}, process_device_locks (), cuda_memory_used);
   }
 
   SessionPlan plan = resolvePlan (prop, shared);

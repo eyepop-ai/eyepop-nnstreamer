@@ -24,11 +24,17 @@ namespace
 class FakeReplica : public Replica
 {
   public:
-  explicit FakeReplica (int id_) : id (id_)
+  FakeReplica (int id_, std::atomic<int> *destroyed_in_use_) : id (id_), destroyed_in_use (destroyed_in_use_)
   {
+  }
+  ~FakeReplica () override
+  {
+    if (in_use > 0)
+      (*destroyed_in_use)++;
   }
   const int id;
   std::atomic<int> in_use{ 0 };
+  std::atomic<int> *destroyed_in_use;
 };
 
 /** @brief Builds fake replicas; each one takes bytes_per_replica of fake device memory. */
@@ -36,6 +42,7 @@ struct FakeFactory {
   std::atomic<int> created{ 0 };
   std::atomic<int> fail_from{ -1 }; /**< creations with index >= fail_from throw */
   std::atomic<uint64_t> device_used{ 0 };
+  std::atomic<int> destroyed_in_use{ 0 }; /**< replicas destroyed while a lease used them */
   uint64_t bytes_per_replica = 100;
   std::chrono::milliseconds delay{ 0 };
 
@@ -52,7 +59,7 @@ struct FakeFactory {
       if (fail_from >= 0 && index >= fail_from)
         throw std::runtime_error ("fake creation failure");
       device_used += bytes_per_replica;
-      return std::make_unique<FakeReplica> (index);
+      return std::make_unique<FakeReplica> (index, &destroyed_in_use);
     };
     spec.host_bytes = [this] () { return bytes_per_replica; };
     return spec;
@@ -70,12 +77,19 @@ replica_id (const Lease &lease)
   return static_cast<FakeReplica *> (lease.replica ())->id;
 }
 
-/** @brief Waits for async grows, which must not outlive the factory they call. */
+/** @brief Isolated device locks for one test's cache. */
+std::shared_ptr<DeviceLocks>
+locks ()
+{
+  return std::make_shared<DeviceLocks> ();
+}
+
+/** @brief Waits for async grow threads, which must not outlive the test locals they call. */
 bool
-wait_for_replicas (const std::shared_ptr<SessionCache> &cache, uint64_t replicas)
+wait_for_grows (const std::shared_ptr<SessionCache> &cache)
 {
   for (int i = 0; i < 300; i++) {
-    if (cache->stats ().replicas == replicas)
+    if (cache->stats ().grows_in_flight == 0)
       return true;
     std::this_thread::sleep_for (10ms);
   }
@@ -121,7 +135,7 @@ TEST (onnxruntimeSessionCache, keyIsHashedOnce)
 TEST (onnxruntimeSessionCache, consumersOfOneKeyShareOneReplica)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   auto spec = factory.spec ("a");
 
   EntryRef first = cache->acquire (spec);
@@ -139,7 +153,7 @@ TEST (onnxruntimeSessionCache, consumersOfOneKeyShareOneReplica)
 TEST (onnxruntimeSessionCache, differentKeysGetDifferentEntries)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
 
   EntryRef a = cache->acquire (factory.spec ("a"));
   EntryRef b = cache->acquire (factory.spec ("b"));
@@ -151,7 +165,7 @@ TEST (onnxruntimeSessionCache, differentKeysGetDifferentEntries)
 TEST (onnxruntimeSessionCache, asapDestroysWithTheLastConsumer)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   auto spec = factory.spec ("a");
 
   EntryRef first = cache->acquire (spec);
@@ -172,7 +186,7 @@ TEST (onnxruntimeSessionCache, asapDestroysWithTheLastConsumer)
 TEST (onnxruntimeSessionCache, lruRetainsUnreferencedReplicas)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru ());
+  auto cache = SessionCache::create (lru (), locks ());
   auto spec = factory.spec ("a");
 
   cache->acquire (spec).reset ();
@@ -186,7 +200,7 @@ TEST (onnxruntimeSessionCache, lruRetainsUnreferencedReplicas)
 TEST (onnxruntimeSessionCache, lruMaxSessionsEvictsTheOldestUnreferenced)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (2));
+  auto cache = SessionCache::create (lru (2), locks ());
 
   cache->acquire (factory.spec ("a")).reset ();
   cache->acquire (factory.spec ("b")).reset ();
@@ -206,7 +220,7 @@ TEST (onnxruntimeSessionCache, lruMaxSessionsEvictsTheOldestUnreferenced)
 TEST (onnxruntimeSessionCache, lruMaxBytesUsesTheMeasuredDeviceSize)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (0, 250), factory.probe ());
+  auto cache = SessionCache::create (lru (0, 250), locks (), factory.probe ());
 
   cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
   cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
@@ -222,7 +236,7 @@ TEST (onnxruntimeSessionCache, lruMaxBytesUsesTheMeasuredDeviceSize)
 TEST (onnxruntimeSessionCache, limitsCombine)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (10, 150), factory.probe ());
+  auto cache = SessionCache::create (lru (10, 150), locks (), factory.probe ());
 
   cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
   cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
@@ -232,7 +246,7 @@ TEST (onnxruntimeSessionCache, limitsCombine)
 TEST (onnxruntimeSessionCache, referencedReplicasAreOvercommittedNotEvicted)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (1));
+  auto cache = SessionCache::create (lru (1), locks ());
 
   EntryRef a = cache->acquire (factory.spec ("a"));
   EntryRef b = cache->acquire (factory.spec ("b"));
@@ -251,7 +265,7 @@ TEST (onnxruntimeSessionCache, referencedReplicasAreOvercommittedNotEvicted)
 TEST (onnxruntimeSessionCache, unboundedReplicaServesConcurrentLeases)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   EntryRef a = cache->acquire (factory.spec ("a"));
   EntryRef b = cache->acquire (factory.spec ("a"));
 
@@ -266,7 +280,7 @@ TEST (onnxruntimeSessionCache, exclusiveGrowsAsynchronouslyUnderContention)
 {
   FakeFactory factory;
   factory.delay = 50ms;
-  auto cache = SessionCache::create (asap (2));
+  auto cache = SessionCache::create (asap (2), locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -283,12 +297,13 @@ TEST (onnxruntimeSessionCache, exclusiveGrowsAsynchronouslyUnderContention)
   CacheStats stats = cache->stats ();
   EXPECT_EQ (stats.grows, 1u);
   EXPECT_EQ (stats.replicas, 2u);
+  EXPECT_TRUE (wait_for_grows (cache));
 }
 
 TEST (onnxruntimeSessionCache, contendedLeaseTakesAReturnedReplicaBeforeTheGrowFinishes)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (asap (2));
+  auto cache = SessionCache::create (asap (2), locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -304,13 +319,14 @@ TEST (onnxruntimeSessionCache, contendedLeaseTakesAReturnedReplicaBeforeTheGrowF
 
   EXPECT_EQ (contended.wait_for (200ms), std::future_status::ready);
   EXPECT_EQ (contended.get (), 0);
-  EXPECT_TRUE (wait_for_replicas (cache, 2));
+  EXPECT_TRUE (wait_for_grows (cache));
+  EXPECT_EQ (cache->stats ().replicas, 2u);
 }
 
 TEST (onnxruntimeSessionCache, exclusiveGrowthIsCapped)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (0, 0, 1));
+  auto cache = SessionCache::create (lru (0, 0, 1), locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -330,7 +346,7 @@ TEST (onnxruntimeSessionCache, exclusiveGrowthIsCapped)
 TEST (onnxruntimeSessionCache, failedGrowStopsGrowingThatKey)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (asap (2));
+  auto cache = SessionCache::create (asap (2), locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -355,12 +371,13 @@ TEST (onnxruntimeSessionCache, failedGrowStopsGrowingThatKey)
   la.release ();
   again.get ();
   EXPECT_EQ (cache->stats ().grows, 1u);
+  EXPECT_TRUE (wait_for_grows (cache));
 }
 
 TEST (onnxruntimeSessionCache, poisonRedirectsEveryConsumerOfTheKey)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru ());
+  auto cache = SessionCache::create (lru (), locks ());
   auto primary = factory.spec ("a|graph");
   auto fallback = factory.spec ("a|nograph");
   EntryRef a = cache->acquire (primary, &fallback);
@@ -387,7 +404,7 @@ TEST (onnxruntimeSessionCache, poisonRedirectsEveryConsumerOfTheKey)
 TEST (onnxruntimeSessionCache, poisonedReplicaInUseIsDestroyedWhenReturned)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   auto primary = factory.spec ("a|graph", Concurrency::Exclusive);
   auto fallback = factory.spec ("a|nograph", Concurrency::Unbounded);
   EntryRef a = cache->acquire (primary);
@@ -406,7 +423,7 @@ TEST (onnxruntimeSessionCache, poisonedReplicaInUseIsDestroyedWhenReturned)
 TEST (onnxruntimeSessionCache, creationFailureFallsBack)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   auto primary = factory.spec ("a|graph");
   primary.create = [] () -> std::unique_ptr<Replica> { throw std::runtime_error ("no graph"); };
   auto fallback = factory.spec ("a|nograph");
@@ -423,7 +440,7 @@ TEST (onnxruntimeSessionCache, creationFailureWithoutFallbackThrowsAndLeavesNoth
 {
   FakeFactory factory;
   factory.fail_from = 0;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
 
   EXPECT_THROW (cache->acquire (factory.spec ("a")), std::runtime_error);
   CacheStats stats = cache->stats ();
@@ -434,7 +451,7 @@ TEST (onnxruntimeSessionCache, creationFailureWithoutFallbackThrowsAndLeavesNoth
 TEST (onnxruntimeSessionCache, firstRunIsMeasured)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (), factory.probe ());
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
   EntryRef a = cache->acquire (factory.spec ("a", Concurrency::Exclusive, 0));
   EXPECT_EQ (cache->stats ().bytes, 100u);
 
@@ -452,7 +469,7 @@ TEST (onnxruntimeSessionCache, exclusiveReplicasAreNeverSharedUnderStress)
 {
   FakeFactory factory;
   factory.delay = 5ms;
-  auto cache = SessionCache::create (lru (0, 0, 3));
+  auto cache = SessionCache::create (lru (0, 0, 3), locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
 
   std::atomic<int> violations{ 0 };
@@ -477,6 +494,7 @@ TEST (onnxruntimeSessionCache, exclusiveReplicasAreNeverSharedUnderStress)
   CacheStats stats = cache->stats ();
   EXPECT_LE (stats.replicas, 3u);
   EXPECT_EQ (stats.consumers, 0u);
+  EXPECT_TRUE (wait_for_grows (cache));
 }
 
 TEST (onnxruntimeSessionCache, warmupRunsNeverOverlapCreationOrEachOther)
@@ -492,7 +510,7 @@ TEST (onnxruntimeSessionCache, warmupRunsNeverOverlapCreationOrEachOther)
     critical.fetch_sub (1);
   };
 
-  auto cache = SessionCache::create (lru (0, 0, 4), factory.probe ());
+  auto cache = SessionCache::create (lru (0, 0, 4), locks (), factory.probe ());
   auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
   spec.serialized_warmup_runs = 2;
   auto create = spec.create;
@@ -519,7 +537,7 @@ TEST (onnxruntimeSessionCache, warmupRunsNeverOverlapCreationOrEachOther)
   }
   for (auto &thread : threads)
     thread.join ();
-  EXPECT_TRUE (wait_for_replicas (cache, cache->stats ().replicas));
+  EXPECT_TRUE (wait_for_grows (cache));
 
   EXPECT_EQ (overlaps, 0);
   EXPECT_GE (serialized_runs, 12);
@@ -528,7 +546,7 @@ TEST (onnxruntimeSessionCache, warmupRunsNeverOverlapCreationOrEachOther)
 TEST (onnxruntimeSessionCache, threadGetsBackTheReplicaItWarmedUp)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (lru (0, 0, 2));
+  auto cache = SessionCache::create (lru (0, 0, 2), locks ());
   auto spec = factory.spec ("graph", Concurrency::Exclusive);
   spec.serialized_warmup_runs = 1;
   EntryRef a = cache->acquire (spec);
@@ -554,7 +572,7 @@ TEST (onnxruntimeSessionCache, threadGetsBackTheReplicaItWarmedUp)
 TEST (onnxruntimeSessionCache, exclusiveLeasesAreFirstComeFirstServed)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EntryRef b = cache->acquire (spec);
@@ -597,7 +615,7 @@ TEST (onnxruntimeSessionCache, exclusiveLeasesAreFirstComeFirstServed)
 TEST (onnxruntimeSessionCache, leaseTellsWhetherTheEntryIsShared)
 {
   FakeFactory factory;
-  auto cache = SessionCache::create (CacheConfig{});
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
   auto spec = factory.spec ("a", Concurrency::Exclusive);
   EntryRef a = cache->acquire (spec);
   EXPECT_FALSE (a.lease ().contended ());
@@ -605,6 +623,81 @@ TEST (onnxruntimeSessionCache, leaseTellsWhetherTheEntryIsShared)
   EXPECT_TRUE (a.lease ().contended ());
   b.reset ();
   EXPECT_FALSE (a.lease ().contended ());
+}
+
+TEST (onnxruntimeSessionCache, evictionNeverDestroysALeasedReplica)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (1, 0, 4), locks ());
+  auto spec = factory.spec ("busy", Concurrency::Exclusive);
+  std::atomic<bool> stop{ false };
+
+  /* consumers of one key keep up to 4 replicas, above the limit of 1, so every
+   * eviction pass targets their idle surplus while they lease */
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; t++) {
+    threads.emplace_back ([&] () {
+      EntryRef ref = cache->acquire (spec);
+      while (!stop) {
+        Lease lease = ref.lease ();
+        auto *replica = static_cast<FakeReplica *> (lease.replica ());
+        replica->in_use++;
+        std::this_thread::yield ();
+        replica->in_use--;
+      }
+    });
+  }
+  /* churn another key to run eviction passes */
+  for (int i = 0; i < 300; i++)
+    cache->acquire (factory.spec ("churn")).reset ();
+  stop = true;
+  for (auto &thread : threads)
+    thread.join ();
+  EXPECT_TRUE (wait_for_grows (cache));
+
+  EXPECT_EQ (factory.destroyed_in_use, 0);
+  EXPECT_GT (cache->stats ().evictions, 0u);
+}
+
+TEST (onnxruntimeSessionCache, redirectTargetOutlivesItsLastConsumer)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{}, locks ());
+  auto primary = factory.spec ("a|graph");
+  auto fallback = factory.spec ("a|nograph");
+
+  EntryRef first = cache->acquire (primary, &fallback);
+  first.poison (fallback);
+  first.lease ().release ();
+  first.reset ();
+
+  /* asap destroyed the fallback's replica; the poisoned key must still reach the same entry */
+  EntryRef again = cache->acquire (primary, &fallback);
+  EXPECT_TRUE (again.spec ().key == fallback.key);
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+
+  EntryRef direct = cache->acquire (fallback);
+  int created = factory.created;
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+  EXPECT_EQ (cache->stats ().consumers, 2u);
+  EXPECT_EQ (factory.created, created);
+}
+
+TEST (onnxruntimeSessionCache, cachesWithSeparateDeviceLocksDoNotBlockEachOther)
+{
+  FakeFactory slow, fast;
+  slow.delay = 300ms;
+  auto slow_cache = SessionCache::create (CacheConfig{}, locks (), slow.probe ());
+  auto fast_cache = SessionCache::create (CacheConfig{}, locks (), fast.probe ());
+
+  auto building = std::async (std::launch::async, [&] () {
+    return slow_cache->acquire (slow.spec ("slow", Concurrency::Exclusive, 0));
+  });
+  std::this_thread::sleep_for (50ms);
+  auto start = std::chrono::steady_clock::now ();
+  EntryRef quick = fast_cache->acquire (fast.spec ("fast", Concurrency::Exclusive, 0));
+  EXPECT_LT (std::chrono::steady_clock::now () - start, 200ms);
+  building.get ();
 }
 
 int

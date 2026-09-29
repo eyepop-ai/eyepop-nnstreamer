@@ -92,6 +92,24 @@ struct ReplicaSpec {
 /** @brief Bytes in use on a device, or nullopt if unknown. */
 using DeviceMemoryProbe = std::function<std::optional<uint64_t> (int device)>;
 
+/**
+ * @brief One lock per device. Creating or destroying a session, or capturing a CUDA
+ * graph, must not overlap on a device, so every cache that shares a device must
+ * share one DeviceLocks.
+ */
+class DeviceLocks
+{
+  public:
+  std::mutex &of (int device)
+  {
+    return mutexes_[static_cast<unsigned> (device) % kDevices];
+  }
+
+  private:
+  static constexpr unsigned kDevices = 16;
+  std::mutex mutexes_[kDevices];
+};
+
 struct CacheStats {
   uint64_t entries = 0;
   uint64_t replicas = 0;
@@ -106,6 +124,7 @@ struct CacheStats {
   uint64_t grows = 0;
   uint64_t grow_failures = 0;
   uint64_t poisons = 0;
+  uint64_t grows_in_flight = 0; /**< async grow threads still running */
 };
 
 class SessionCache;
@@ -186,8 +205,8 @@ class EntryRef
 class SessionCache : public std::enable_shared_from_this<SessionCache>
 {
   public:
-  static std::shared_ptr<SessionCache> create (
-      const CacheConfig &config, DeviceMemoryProbe probe = nullptr);
+  static std::shared_ptr<SessionCache> create (const CacheConfig &config,
+      std::shared_ptr<DeviceLocks> device_locks, DeviceMemoryProbe probe = nullptr);
   ~SessionCache ();
 
   /**
@@ -207,7 +226,8 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
   friend class Lease;
   friend class EntryRef;
 
-  SessionCache (const CacheConfig &config, DeviceMemoryProbe probe);
+  SessionCache (const CacheConfig &config, std::shared_ptr<DeviceLocks> device_locks,
+      DeviceMemoryProbe probe);
 
   std::shared_ptr<Entry> entry_for (const ReplicaSpec &spec); /**< cache_mu_ held */
   void add_consumer (const std::shared_ptr<Entry> &entry); /**< cache_mu_ held */
@@ -228,6 +248,9 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
   }
 
   const CacheConfig config_;
+  void destroy_slots (std::vector<std::unique_ptr<ReplicaSlot>> &slots);
+
+  const std::shared_ptr<DeviceLocks> device_locks_;
   const DeviceMemoryProbe probe_;
 
   mutable std::mutex cache_mu_; /**< guards entries_; taken before any Entry mutex */
@@ -243,6 +266,7 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
   std::atomic<uint64_t> grows_{ 0 };
   std::atomic<uint64_t> grow_failures_{ 0 };
   std::atomic<uint64_t> poisons_{ 0 };
+  std::atomic<uint64_t> grows_in_flight_{ 0 };
 };
 
 } /* namespace tensor_filter_onnxruntime */
