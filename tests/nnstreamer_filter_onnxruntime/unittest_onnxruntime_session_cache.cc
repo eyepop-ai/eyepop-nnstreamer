@@ -1,0 +1,474 @@
+/* SPDX-License-Identifier: LGPL-2.1-only */
+/**
+ * @file    unittest_onnxruntime_session_cache.cc
+ * @brief   Unit tests for the onnxruntime session cache core, with fake sessions
+ */
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+#include "../../ext/nnstreamer/tensor_filter/tensor_filter_onnxruntime_session_cache.hh"
+
+using namespace nnstreamer::tensor_filter_onnxruntime;
+using namespace std::chrono_literals;
+
+namespace
+{
+
+class FakeReplica : public Replica
+{
+  public:
+  explicit FakeReplica (int id_) : id (id_)
+  {
+  }
+  const int id;
+  std::atomic<int> in_use{ 0 };
+};
+
+/** @brief Builds fake replicas; each one takes bytes_per_replica of fake device memory. */
+struct FakeFactory {
+  std::atomic<int> created{ 0 };
+  std::atomic<int> fail_from{ -1 }; /**< creations with index >= fail_from throw */
+  std::atomic<uint64_t> device_used{ 0 };
+  uint64_t bytes_per_replica = 100;
+  std::chrono::milliseconds delay{ 0 };
+
+  ReplicaSpec spec (const std::string &key, Concurrency concurrency = Concurrency::Unbounded, int device = -1)
+  {
+    ReplicaSpec spec;
+    spec.key = SessionKey (key);
+    spec.concurrency = concurrency;
+    spec.device = device;
+    spec.create = [this] () -> std::unique_ptr<Replica> {
+      if (delay.count ())
+        std::this_thread::sleep_for (delay);
+      int index = created++;
+      if (fail_from >= 0 && index >= fail_from)
+        throw std::runtime_error ("fake creation failure");
+      device_used += bytes_per_replica;
+      return std::make_unique<FakeReplica> (index);
+    };
+    spec.host_bytes = [this] () { return bytes_per_replica; };
+    return spec;
+  }
+
+  DeviceMemoryProbe probe ()
+  {
+    return [this] (int) -> std::optional<uint64_t> { return device_used.load (); };
+  }
+};
+
+int
+replica_id (const Lease &lease)
+{
+  return static_cast<FakeReplica *> (lease.replica ())->id;
+}
+
+/** @brief Waits for async grows, which must not outlive the factory they call. */
+bool
+wait_for_replicas (const std::shared_ptr<SessionCache> &cache, uint64_t replicas)
+{
+  for (int i = 0; i < 300; i++) {
+    if (cache->stats ().replicas == replicas)
+      return true;
+    std::this_thread::sleep_for (10ms);
+  }
+  return false;
+}
+
+CacheConfig
+lru (uint64_t max_sessions = 0, uint64_t max_bytes = 0, unsigned max_replicas = 2)
+{
+  CacheConfig config;
+  config.strategy = CacheStrategy::Lru;
+  config.max_sessions = max_sessions;
+  config.max_bytes = max_bytes;
+  config.max_replicas_per_key = max_replicas;
+  return config;
+}
+
+} /* namespace */
+
+TEST (onnxruntimeSessionCache, keyIsHashedOnce)
+{
+  SessionKey a ("model|cpu|0");
+  SessionKey b ("model|cpu|0");
+  SessionKey c ("model|cuda|0");
+  EXPECT_EQ (a.hash, b.hash);
+  EXPECT_TRUE (a == b);
+  EXPECT_FALSE (a == c);
+}
+
+TEST (onnxruntimeSessionCache, consumersOfOneKeyShareOneReplica)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a");
+
+  EntryRef first = cache->acquire (spec);
+  EntryRef second = cache->acquire (spec);
+
+  EXPECT_EQ (factory.created, 1);
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.entries, 1u);
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (stats.consumers, 2u);
+  EXPECT_EQ (stats.misses, 1u);
+  EXPECT_EQ (stats.hits, 1u);
+}
+
+TEST (onnxruntimeSessionCache, differentKeysGetDifferentEntries)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+
+  EntryRef a = cache->acquire (factory.spec ("a"));
+  EntryRef b = cache->acquire (factory.spec ("b"));
+
+  EXPECT_EQ (factory.created, 2);
+  EXPECT_EQ (cache->stats ().entries, 2u);
+}
+
+TEST (onnxruntimeSessionCache, asapDestroysWithTheLastConsumer)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a");
+
+  EntryRef first = cache->acquire (spec);
+  EntryRef second = cache->acquire (spec);
+  first.reset ();
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+
+  second.reset ();
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.replicas, 0u);
+  EXPECT_EQ (stats.entries, 0u);
+  EXPECT_EQ (stats.sessions_destroyed, 1u);
+
+  EntryRef again = cache->acquire (spec);
+  EXPECT_EQ (factory.created, 2);
+}
+
+TEST (onnxruntimeSessionCache, lruRetainsUnreferencedReplicas)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru ());
+  auto spec = factory.spec ("a");
+
+  cache->acquire (spec).reset ();
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+
+  EntryRef again = cache->acquire (spec);
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().hits, 1u);
+}
+
+TEST (onnxruntimeSessionCache, lruMaxSessionsEvictsTheOldestUnreferenced)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (2));
+
+  cache->acquire (factory.spec ("a")).reset ();
+  cache->acquire (factory.spec ("b")).reset ();
+  cache->acquire (factory.spec ("c")).reset ();
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.replicas, 2u);
+  EXPECT_EQ (stats.evictions, 1u);
+
+  cache->acquire (factory.spec ("b")).reset ();
+  cache->acquire (factory.spec ("c")).reset ();
+  EXPECT_EQ (factory.created, 3);
+  cache->acquire (factory.spec ("a")).reset ();
+  EXPECT_EQ (factory.created, 4);
+}
+
+TEST (onnxruntimeSessionCache, lruMaxBytesUsesTheMeasuredDeviceSize)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (0, 250), factory.probe ());
+
+  cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
+  cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
+  EXPECT_EQ (cache->stats ().bytes, 200u);
+
+  cache->acquire (factory.spec ("c", Concurrency::Unbounded, 0)).reset ();
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.bytes, 200u);
+  EXPECT_EQ (stats.replicas, 2u);
+  EXPECT_EQ (stats.evictions, 1u);
+}
+
+TEST (onnxruntimeSessionCache, limitsCombine)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (10, 150), factory.probe ());
+
+  cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
+  cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+}
+
+TEST (onnxruntimeSessionCache, referencedReplicasAreOvercommittedNotEvicted)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (1));
+
+  EntryRef a = cache->acquire (factory.spec ("a"));
+  EntryRef b = cache->acquire (factory.spec ("b"));
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.replicas, 2u);
+  EXPECT_EQ (stats.evictions, 0u);
+  EXPECT_GE (stats.overcommits, 1u);
+
+  a.reset ();
+  stats = cache->stats ();
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (stats.evictions, 1u);
+}
+
+TEST (onnxruntimeSessionCache, unboundedReplicaServesConcurrentLeases)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  EntryRef a = cache->acquire (factory.spec ("a"));
+  EntryRef b = cache->acquire (factory.spec ("a"));
+
+  Lease la = a.lease ();
+  Lease lb = b.lease ();
+  EXPECT_EQ (la.replica (), lb.replica ());
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().grows, 0u);
+}
+
+TEST (onnxruntimeSessionCache, exclusiveGrowsAsynchronouslyUnderContention)
+{
+  FakeFactory factory;
+  factory.delay = 50ms;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+
+  Lease la = a.lease ();
+  auto contended = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+
+  EXPECT_EQ (contended.wait_for (2s), std::future_status::ready);
+  EXPECT_EQ (contended.get (), 1);
+  EXPECT_EQ (replica_id (la), 0);
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.grows, 1u);
+  EXPECT_EQ (stats.replicas, 2u);
+}
+
+TEST (onnxruntimeSessionCache, contendedLeaseTakesAReturnedReplicaBeforeTheGrowFinishes)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+  factory.delay = 500ms;
+
+  Lease la = a.lease ();
+  auto contended = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  std::this_thread::sleep_for (50ms);
+  la.release ();
+
+  EXPECT_EQ (contended.wait_for (200ms), std::future_status::ready);
+  EXPECT_EQ (contended.get (), 0);
+  EXPECT_TRUE (wait_for_replicas (cache, 2));
+}
+
+TEST (onnxruntimeSessionCache, exclusiveGrowthIsCapped)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (0, 0, 1));
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+
+  Lease la = a.lease ();
+  auto contended = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  EXPECT_EQ (contended.wait_for (100ms), std::future_status::timeout);
+  la.release ();
+  EXPECT_EQ (contended.get (), 0);
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().grows, 0u);
+}
+
+TEST (onnxruntimeSessionCache, failedGrowStopsGrowingThatKey)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+  factory.fail_from = 1;
+
+  Lease la = a.lease ();
+  auto contended = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  std::this_thread::sleep_for (100ms);
+  EXPECT_EQ (cache->stats ().grow_failures, 1u);
+  la.release ();
+  EXPECT_EQ (contended.get (), 0);
+
+  la = a.lease ();
+  auto again = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  EXPECT_EQ (again.wait_for (100ms), std::future_status::timeout);
+  la.release ();
+  again.get ();
+  EXPECT_EQ (cache->stats ().grows, 1u);
+}
+
+TEST (onnxruntimeSessionCache, poisonRedirectsEveryConsumerOfTheKey)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru ());
+  auto primary = factory.spec ("a|graph");
+  auto fallback = factory.spec ("a|nograph");
+  EntryRef a = cache->acquire (primary, &fallback);
+  EntryRef b = cache->acquire (primary, &fallback);
+
+  a.poison (fallback);
+  EXPECT_TRUE (a.spec ().key == fallback.key);
+  EXPECT_TRUE (b.spec ().key == primary.key);
+
+  Lease lb = b.lease ();
+  EXPECT_TRUE (b.spec ().key == fallback.key);
+  lb.release ();
+
+  EntryRef late = cache->acquire (primary, &fallback);
+  EXPECT_TRUE (late.spec ().key == fallback.key);
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.poisons, 1u);
+  EXPECT_EQ (factory.created, 2);
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (stats.consumers, 3u);
+}
+
+TEST (onnxruntimeSessionCache, poisonedReplicaInUseIsDestroyedWhenReturned)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto primary = factory.spec ("a|graph", Concurrency::Exclusive);
+  auto fallback = factory.spec ("a|nograph", Concurrency::Unbounded);
+  EntryRef a = cache->acquire (primary);
+  EntryRef b = cache->acquire (primary);
+
+  Lease la = a.lease ();
+  b.poison (fallback);
+  EXPECT_EQ (cache->stats ().sessions_destroyed, 0u);
+  la.release ();
+  EXPECT_EQ (cache->stats ().sessions_destroyed, 1u);
+
+  Lease again = a.lease ();
+  EXPECT_TRUE (a.spec ().key == fallback.key);
+}
+
+TEST (onnxruntimeSessionCache, creationFailureFallsBack)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (CacheConfig{});
+  auto primary = factory.spec ("a|graph");
+  primary.create = [] () -> std::unique_ptr<Replica> { throw std::runtime_error ("no graph"); };
+  auto fallback = factory.spec ("a|nograph");
+
+  EntryRef a = cache->acquire (primary, &fallback);
+  EXPECT_TRUE (a.spec ().key == fallback.key);
+  EntryRef b = cache->acquire (primary, &fallback);
+  EXPECT_TRUE (b.spec ().key == fallback.key);
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().poisons, 1u);
+}
+
+TEST (onnxruntimeSessionCache, creationFailureWithoutFallbackThrowsAndLeavesNothing)
+{
+  FakeFactory factory;
+  factory.fail_from = 0;
+  auto cache = SessionCache::create (CacheConfig{});
+
+  EXPECT_THROW (cache->acquire (factory.spec ("a")), std::runtime_error);
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.entries, 0u);
+  EXPECT_EQ (stats.consumers, 0u);
+}
+
+TEST (onnxruntimeSessionCache, firstRunIsMeasured)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), factory.probe ());
+  EntryRef a = cache->acquire (factory.spec ("a", Concurrency::Exclusive, 0));
+  EXPECT_EQ (cache->stats ().bytes, 100u);
+
+  Lease first = a.lease ();
+  first.run ([&factory] () { factory.device_used += 40; });
+  first.release ();
+  EXPECT_EQ (cache->stats ().bytes, 140u);
+
+  Lease second = a.lease ();
+  second.run ([&factory] () { factory.device_used += 40; });
+  EXPECT_EQ (cache->stats ().bytes, 140u);
+}
+
+TEST (onnxruntimeSessionCache, exclusiveReplicasAreNeverSharedUnderStress)
+{
+  FakeFactory factory;
+  factory.delay = 5ms;
+  auto cache = SessionCache::create (lru (0, 0, 3));
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+
+  std::atomic<int> violations{ 0 };
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 8; t++) {
+    threads.emplace_back ([&] () {
+      EntryRef ref = cache->acquire (spec);
+      for (int i = 0; i < 200; i++) {
+        Lease lease = ref.lease ();
+        auto *replica = static_cast<FakeReplica *> (lease.replica ());
+        if (replica->in_use.fetch_add (1) != 0)
+          violations++;
+        std::this_thread::yield ();
+        replica->in_use.fetch_sub (1);
+      }
+    });
+  }
+  for (auto &thread : threads)
+    thread.join ();
+
+  EXPECT_EQ (violations, 0);
+  CacheStats stats = cache->stats ();
+  EXPECT_LE (stats.replicas, 3u);
+  EXPECT_EQ (stats.consumers, 0u);
+}
+
+int
+main (int argc, char **argv)
+{
+  testing::InitGoogleTest (&argc, argv);
+  return RUN_ALL_TESTS ();
+}

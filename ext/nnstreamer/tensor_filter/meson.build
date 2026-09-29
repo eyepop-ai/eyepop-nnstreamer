@@ -905,9 +905,12 @@ if executorch_llama_support_is_available
 endif
 
 if onnxruntime_support_is_available
-  filter_sub_onnxruntime_sources = ['tensor_filter_onnxruntime.cc']
+  filter_sub_onnxruntime_sources = [
+    'tensor_filter_onnxruntime.cc',
+    'tensor_filter_onnxruntime_session_cache.cc'
+  ]
 
-  nnstreamer_filter_onnxruntime_deps = [glib_dep, nnstreamer_single_dep, onnxruntime_support_deps]
+  nnstreamer_filter_onnxruntime_deps = [glib_dep, gst_dep, thread_dep, nnstreamer_single_dep, onnxruntime_support_deps]
 
   shared_library('nnstreamer_filter_onnxruntime',
     filter_sub_onnxruntime_sources,
