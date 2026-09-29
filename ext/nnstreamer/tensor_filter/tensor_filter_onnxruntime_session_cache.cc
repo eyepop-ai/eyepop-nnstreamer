@@ -53,6 +53,28 @@ device_mutex (int device)
   return mutexes[static_cast<unsigned> (device) % 16];
 }
 
+/** @brief Bytes a device gained around fn, if probe could measure both ends. */
+static bool
+measure_growth (const DeviceMemoryProbe &probe, int device, const std::function<void ()> &fn, uint64_t &grown)
+{
+  uint64_t before = 0, after = 0;
+  bool known = false;
+  if (probe) {
+    if (auto used = probe (device)) {
+      before = *used;
+      known = true;
+    }
+  }
+  fn ();
+  if (known) {
+    auto used = probe (device);
+    known = used.has_value ();
+    after = known ? *used : 0;
+  }
+  grown = known && after > before ? after - before : 0;
+  return known;
+}
+
 /** @brief Destroys slots; device replicas under their device lock. */
 static void
 destroy_slots (std::vector<std::unique_ptr<ReplicaSlot>> &slots)
@@ -345,13 +367,8 @@ SessionCache::build (const ReplicaSpec &spec)
 
   if (spec.device >= 0) {
     std::lock_guard<std::mutex> lock (device_mutex (spec.device));
-    std::optional<uint64_t> before = probe_ ? probe_ (spec.device) : std::nullopt;
-    slot->replica = spec.create ();
-    std::optional<uint64_t> after = probe_ ? probe_ (spec.device) : std::nullopt;
-    if (before && after) {
-      measured = true;
-      slot->bytes = *after > *before ? *after - *before : 0;
-    }
+    measured = measure_growth (probe_, spec.device,
+        [&slot, &spec] () { slot->replica = spec.create (); }, slot->bytes);
   } else {
     slot->replica = spec.create ();
   }
@@ -526,11 +543,7 @@ SessionCache::run_measured (Lease &lease, const std::function<void ()> &fn)
   uint64_t grown = 0;
   {
     std::lock_guard<std::mutex> lock (device_mutex (spec.device));
-    std::optional<uint64_t> before = measure ? probe_ (spec.device) : std::nullopt;
-    fn ();
-    std::optional<uint64_t> after = measure ? probe_ (spec.device) : std::nullopt;
-    if (before && after && *after > *before)
-      grown = *after - *before;
+    measure_growth (measure ? probe_ : DeviceMemoryProbe (), spec.device, fn, grown);
   }
   if (grown == 0)
     return;
