@@ -11,6 +11,8 @@
  *  - an Exclusive replica serves one lease at a time (EPs that serialize Run()
  *    or capture a CUDA graph), first come, first served; under contention the
  *    Entry grows another replica asynchronously, up to max_replicas_per_key.
+ * A replica whose spec pins runs owns a thread that runs every lease of it,
+ * whichever consumer thread holds the lease.
  * A consumer that finds its primary Entry broken (poisoned) is redirected to a
  * fallback Entry, and so is every later consumer of that key.
  *
@@ -85,6 +87,14 @@ struct ReplicaSpec {
    * captures, meanwhile; the CUDA EP captures per thread, TensorRT after a warm-up run.
    */
   unsigned serialized_warmup_runs = 0;
+  /**
+   * @brief Runs every lease of a replica on one thread the replica owns, not on the caller's.
+   * The CUDA EP keeps a context, with its captured graph and memory, for each thread that ran
+   * a graph-enabled session, until the session is destroyed; a cached session would collect
+   * one per consumer thread.
+   */
+  bool pin_runs = false;
+  std::string run_thread_name; /**< a pinned replica's thread name; the first 15 characters */
   std::function<std::unique_ptr<Replica> ()> create; /**< may throw */
   std::function<uint64_t ()> host_bytes; /**< size estimate when no device probe applies; optional */
 };
@@ -152,7 +162,10 @@ class Lease
   {
     return contended_;
   }
-  /** @brief Runs fn; the first run of a replica is measured and added to its size. */
+  /**
+   * @brief Runs fn, on the replica's own thread if its spec pins runs, and rethrows what fn
+   * throws; the first run of a replica is measured and added to its size.
+   */
   void run (const std::function<void ()> &fn);
   void release ();
 

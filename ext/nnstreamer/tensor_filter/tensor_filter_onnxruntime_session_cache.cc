@@ -12,12 +12,16 @@
 
 #include <algorithm>
 #include <deque>
+#include <exception>
 #include <unordered_set>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
 
 #include <glib.h>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 #ifdef G_LOG_DOMAIN
 #undef G_LOG_DOMAIN
@@ -29,8 +33,92 @@ namespace nnstreamer
 namespace tensor_filter_onnxruntime
 {
 
+/**
+ * @brief The one thread that runs a pinned replica. A lease is exclusive, so at most one
+ * job is ever handed over; run() blocks until it is done and rethrows what it threw.
+ */
+class RunThread
+{
+  public:
+  explicit RunThread (const std::string &name) : thread (&RunThread::loop, this)
+  {
+#if defined(__linux__)
+    pthread_setname_np (thread.native_handle (), name.substr (0, 15).c_str ());
+#else
+    (void) name;
+#endif
+  }
+
+  /** @brief Never called while a job runs: the slot is destroyed only without leases. */
+  ~RunThread ()
+  {
+    {
+      std::lock_guard<std::mutex> lock (mu);
+      stop = true;
+    }
+    cv.notify_all ();
+    thread.join ();
+  }
+
+  RunThread (const RunThread &) = delete;
+  RunThread &operator= (const RunThread &) = delete;
+
+  std::thread::id id () const
+  {
+    return thread.get_id ();
+  }
+
+  void run (const std::function<void ()> &fn)
+  {
+    std::exception_ptr error;
+    {
+      std::unique_lock<std::mutex> lock (mu);
+      job = &fn;
+      done = false;
+      cv.notify_all ();
+      cv.wait (lock, [this] () { return done; });
+      std::swap (error, this->error);
+    }
+    if (error)
+      std::rethrow_exception (error);
+  }
+
+  private:
+  void loop ()
+  {
+    std::unique_lock<std::mutex> lock (mu);
+    for (;;) {
+      cv.wait (lock, [this] () { return stop || job; });
+      if (!job)
+        return;
+      const std::function<void ()> *fn = job;
+      lock.unlock ();
+      std::exception_ptr thrown;
+      try {
+        (*fn) ();
+      } catch (...) {
+        thrown = std::current_exception ();
+      }
+      lock.lock ();
+      job = nullptr;
+      error = thrown;
+      done = true;
+      cv.notify_all ();
+    }
+  }
+
+  std::mutex mu;
+  std::condition_variable cv;
+  const std::function<void ()> *job = nullptr;
+  std::exception_ptr error;
+  bool done = false;
+  bool stop = false;
+  std::thread thread; /**< last: starts after the members it uses */
+};
+
 struct ReplicaSlot {
   std::unique_ptr<Replica> replica;
+  std::unique_ptr<RunThread> runner; /**< with pin_runs; declared after replica, so joined before it is destroyed */
   int device = -1;
   unsigned leases = 0;
   uint64_t last_used = 0;
@@ -44,6 +132,20 @@ struct ReplicaSlot {
       if (runs.first == thread)
         return &runs.second;
     return nullptr;
+  }
+
+  /** @brief The thread that runs this replica for a lease the calling thread takes. */
+  std::thread::id run_thread () const
+  {
+    return runner ? runner->id () : std::this_thread::get_id ();
+  }
+
+  void run (const std::function<void ()> &fn)
+  {
+    if (runner)
+      runner->run (fn);
+    else
+      fn ();
   }
 };
 
@@ -367,6 +469,8 @@ SessionCache::build (const ReplicaSpec &spec)
   auto slot = std::make_unique<ReplicaSlot> ();
   bool measured = false;
   slot->device = spec.device;
+  if (spec.pin_runs)
+    slot->runner = std::make_unique<RunThread> (spec.run_thread_name);
 
   if (spec.device >= 0) {
     std::lock_guard<std::mutex> lock (device_locks_->of (spec.device));
@@ -473,14 +577,13 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
         if (!pick || slot->leases < pick->leases)
           pick = slot.get ();
     } else {
-      /* a free replica this thread already warmed up (no new graph capture), then the
-       * most recently used one, so surplus replicas age out */
-      const std::thread::id self = std::this_thread::get_id ();
+      /* a free replica already warmed up on the thread that would run it for this one
+       * (no new graph capture), then the most recently used one, so surplus replicas age out */
       bool pick_warm = false;
       for (auto &slot : entry->replicas) {
         if (slot->leases > 0)
           continue;
-        bool warm = slot->runs_of (self) != nullptr;
+        bool warm = slot->runs_of (slot->run_thread ()) != nullptr;
         if (!pick || (warm && !pick_warm) || (warm == pick_warm && slot->last_used > pick->last_used)) {
           pick = slot.get ();
           pick_warm = warm;
@@ -505,9 +608,10 @@ SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry>
       lease.contended_ = entry->consumers > 1;
       pick->used = true;
       if (entry->spec.serialized_warmup_runs > 0) {
-        unsigned *runs = pick->runs_of (std::this_thread::get_id ());
+        const std::thread::id thread = pick->run_thread ();
+        unsigned *runs = pick->runs_of (thread);
         if (!runs) {
-          pick->runs_by_thread.emplace_back (std::this_thread::get_id (), 0);
+          pick->runs_by_thread.emplace_back (thread, 0);
           runs = &pick->runs_by_thread.back ().second;
         }
         lease.serialize_ = (*runs)++ < entry->spec.serialized_warmup_runs;
@@ -574,9 +678,10 @@ void
 SessionCache::run_measured (Lease &lease, const std::function<void ()> &fn)
 {
   const ReplicaSpec &spec = lease.entry_->spec;
+  ReplicaSlot &slot = *lease.slot_;
   const bool measure = lease.first_use_ && probe_;
   if (spec.device < 0 || !(measure || lease.serialize_)) {
-    fn ();
+    slot.run (fn);
     return;
   }
   lease.first_use_ = false;
@@ -584,8 +689,10 @@ SessionCache::run_measured (Lease &lease, const std::function<void ()> &fn)
 
   uint64_t grown = 0;
   {
+    /* the caller holds the device lock while a pinned replica runs on its own thread */
     std::lock_guard<std::mutex> lock (device_locks_->of (spec.device));
-    measure_growth (measure ? probe_ : DeviceMemoryProbe (), spec.device, fn, grown);
+    measure_growth (measure ? probe_ : DeviceMemoryProbe (), spec.device,
+        [&slot, &fn] () { slot.run (fn); }, grown);
   }
   if (grown == 0)
     return;
