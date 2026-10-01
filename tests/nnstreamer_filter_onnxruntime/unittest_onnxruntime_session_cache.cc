@@ -8,7 +8,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -698,6 +701,147 @@ TEST (onnxruntimeSessionCache, cachesWithSeparateDeviceLocksDoNotBlockEachOther)
   EntryRef quick = fast_cache->acquire (fast.spec ("fast", Concurrency::Exclusive, 0));
   EXPECT_LT (std::chrono::steady_clock::now () - start, 200ms);
   building.get ();
+}
+
+TEST (onnxruntimeSessionCache, pinnedReplicaRunsEveryLeaseOnItsOwnThread)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (0, 0, 1), locks (), factory.probe ());
+  auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
+  spec.pin_runs = true;
+  spec.serialized_warmup_runs = 2;
+
+  std::mutex mu;
+  std::set<std::thread::id> callers, runners;
+  auto consumer = [&] () {
+    EntryRef ref = cache->acquire (spec);
+    for (int i = 0; i < 5; i++) {
+      Lease lease = ref.lease ();
+      lease.run ([&] () {
+        std::lock_guard<std::mutex> lock (mu);
+        runners.insert (std::this_thread::get_id ());
+      });
+    }
+    std::lock_guard<std::mutex> lock (mu);
+    callers.insert (std::this_thread::get_id ());
+  };
+  /* one after the other, as pipelines come and go, and then side by side */
+  for (int t = 0; t < 3; t++)
+    std::thread (consumer).join ();
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 3; t++)
+    threads.emplace_back (consumer);
+  for (auto &thread : threads)
+    thread.join ();
+
+  ASSERT_EQ (runners.size (), 1u);
+  EXPECT_EQ (callers.count (*runners.begin ()), 0u);
+  EXPECT_EQ (cache->stats ().sessions_created, 1u);
+}
+
+TEST (onnxruntimeSessionCache, pinnedReplicaWarmsUpOnceWhateverThreadLeasesIt)
+{
+  FakeFactory factory;
+  auto device_locks = locks ();
+  auto cache = SessionCache::create (lru (0, 0, 1), device_locks, factory.probe ());
+  auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
+  spec.pin_runs = true;
+  spec.serialized_warmup_runs = 2;
+
+  /* a serialized run holds the device lock while it runs; the consumers take turns but all
+   * stay alive, so none of them gets the thread id of one before it */
+  std::atomic<int> serialized{ 0 };
+  std::mutex turn_mu;
+  std::condition_variable turn_cv;
+  int turn = 0;
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; t++) {
+    threads.emplace_back ([&, t] () {
+      std::unique_lock<std::mutex> turn_lock (turn_mu);
+      turn_cv.wait (turn_lock, [&] () { return turn == t; });
+      {
+        EntryRef ref = cache->acquire (spec);
+        for (int i = 0; i < 3; i++) {
+          ref.lease ().run ([&] () {
+            std::unique_lock<std::mutex> lock (device_locks->of (0), std::try_to_lock);
+            if (!lock.owns_lock ())
+              serialized++;
+          });
+        }
+      }
+      turn++;
+      turn_cv.notify_all ();
+    });
+  }
+  for (auto &thread : threads)
+    thread.join ();
+  EXPECT_EQ (serialized, 2);
+}
+
+TEST (onnxruntimeSessionCache, pinnedRunRethrowsWhatTheRunThrew)
+{
+  struct ProviderError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+  };
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
+  spec.pin_runs = true;
+  EntryRef ref = cache->acquire (spec);
+
+  EXPECT_THROW (ref.lease ().run ([] () { throw ProviderError ("capture failed"); }), ProviderError);
+  /* the thread survives a failed run */
+  bool ran = false;
+  ref.lease ().run ([&ran] () { ran = true; });
+  EXPECT_TRUE (ran);
+}
+
+TEST (onnxruntimeSessionCache, pinningAnUnboundedReplicaIsRefused)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  auto pinned = factory.spec ("unbounded", Concurrency::Unbounded, 0);
+  pinned.pin_runs = true;
+  EXPECT_THROW (cache->acquire (pinned), std::invalid_argument);
+
+  auto graph = factory.spec ("a|graph", Concurrency::Exclusive, 0);
+  EXPECT_THROW (cache->acquire (graph, &pinned), std::invalid_argument);
+  EntryRef ref = cache->acquire (graph);
+  EXPECT_THROW (ref.poison (pinned), std::invalid_argument);
+
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().poisons, 0u);
+}
+
+TEST (onnxruntimeSessionCache, pinnedThreadEndsWithItsReplica)
+{
+  /** @brief Counts the exit of the thread that constructed it. */
+  struct ExitCounter {
+    std::atomic<int> *exits = nullptr;
+    ~ExitCounter ()
+    {
+      if (exits)
+        (*exits)++;
+    }
+  };
+  std::atomic<int> exits{ 0 };
+
+  FakeFactory factory;
+  auto cache = SessionCache::create (asap (1), locks (), factory.probe ());
+  auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
+  spec.pin_runs = true;
+  EntryRef ref = cache->acquire (spec);
+  ref.lease ().run ([&exits] () {
+    /* declared here, so it is constructed on the run thread and destroyed when that thread exits */
+    thread_local ExitCounter counter;
+    counter.exits = &exits;
+  });
+  EXPECT_EQ (exits, 0);
+
+  /* asap destroys the replica with its last consumer, and joins its thread first */
+  ref.reset ();
+  EXPECT_EQ (cache->stats ().sessions_destroyed, 1u);
+  EXPECT_EQ (exits, 1);
 }
 
 int
