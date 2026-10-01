@@ -1182,6 +1182,15 @@ make_spec (const SessionPlan &plan, const std::string &file_identity)
     /* ORT captures on the first Run() of a thread (CUDA EP) or after one warm-up run (TensorRT) */
     spec.serialized_warmup_runs = plan.ep == OrtEp::Tensorrt ? 3 : 2;
   }
+  /* the CUDA EP keeps a graph and its memory per thread that ran the session; TensorRT is not measured yet */
+  if (plan.ep == OrtEp::Cuda && plan.graph) {
+    spec.pin_runs = true;
+    g_autofree gchar *model_name = g_path_get_basename (plan.model_path.c_str ());
+    std::string stem = model_name;
+    if (g_str_has_suffix (model_name, ".onnx"))
+      stem.resize (stem.size () - strlen (".onnx"));
+    spec.run_thread_name = "ort-" + stem;
+  }
   spec.create = [plan] () -> std::unique_ptr<Replica> { return std::make_unique<OrtReplica> (plan); };
   spec.host_bytes = [path = plan.model_path] () { return model_file_bytes (path); };
   return spec;
