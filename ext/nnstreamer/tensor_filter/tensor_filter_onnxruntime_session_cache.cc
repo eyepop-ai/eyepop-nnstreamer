@@ -398,9 +398,20 @@ SessionCache::add_consumer (const std::shared_ptr<Entry> &entry)
   entry->consumers++;
 }
 
+/** @brief Refuses a spec the cache cannot honour: a run thread serves one lease at a time. */
+static void
+check_spec (const ReplicaSpec &spec)
+{
+  if (spec.pin_runs && spec.concurrency != Concurrency::Exclusive)
+    throw std::invalid_argument ("pinned runs need an exclusive replica: " + spec.key.canonical);
+}
+
 EntryRef
 SessionCache::acquire (const ReplicaSpec &spec, const ReplicaSpec *fallback)
 {
+  check_spec (spec);
+  if (fallback)
+    check_spec (*fallback);
   EntryRef ref;
   ref.cache_ = shared_from_this ();
   {
@@ -754,6 +765,7 @@ SessionCache::poison (const std::shared_ptr<Entry> &entry, const ReplicaSpec &fa
 {
   if (entry->spec.key == fallback.key)
     throw std::logic_error ("cannot fall back to the same key " + fallback.key.canonical);
+  check_spec (fallback);
 
   std::shared_ptr<Entry> to;
   std::vector<std::unique_ptr<ReplicaSlot>> discard;

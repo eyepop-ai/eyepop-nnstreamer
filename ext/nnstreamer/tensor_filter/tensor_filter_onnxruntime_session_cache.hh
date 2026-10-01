@@ -91,7 +91,8 @@ struct ReplicaSpec {
    * @brief Runs every lease of a replica on one thread the replica owns, not on the caller's.
    * The CUDA EP keeps a context, with its captured graph and memory, for each thread that ran
    * a graph-enabled session, until the session is destroyed; a cached session would collect
-   * one per consumer thread.
+   * one per consumer thread. Needs Concurrency::Exclusive: the thread runs one lease at a time,
+   * and the cache refuses a spec that pins an unbounded replica.
    */
   bool pin_runs = false;
   std::string run_thread_name; /**< a pinned replica's thread name; the first 15 characters */
@@ -226,6 +227,7 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
    * @brief A consumer's ref to the Entry of spec.key, with at least one replica built.
    * If building a replica throws and fallback is given, the key is poisoned and
    * the consumer lands on fallback. Otherwise the exception propagates.
+   * Throws std::invalid_argument for a spec that pins runs without Concurrency::Exclusive.
    */
   EntryRef acquire (const ReplicaSpec &spec, const ReplicaSpec *fallback = nullptr);
 

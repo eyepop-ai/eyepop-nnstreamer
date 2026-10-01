@@ -796,22 +796,34 @@ TEST (onnxruntimeSessionCache, pinnedRunRethrowsWhatTheRunThrew)
   EXPECT_TRUE (ran);
 }
 
-namespace
+TEST (onnxruntimeSessionCache, pinningAnUnboundedReplicaIsRefused)
 {
-/** @brief Counts the exit of each thread that set exits; constructed on its first use in a thread. */
-struct ExitCounter {
-  std::atomic<int> *exits = nullptr;
-  ~ExitCounter ()
-  {
-    if (exits)
-      (*exits)++;
-  }
-};
-thread_local ExitCounter exit_counter;
-} /* namespace */
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  auto pinned = factory.spec ("unbounded", Concurrency::Unbounded, 0);
+  pinned.pin_runs = true;
+  EXPECT_THROW (cache->acquire (pinned), std::invalid_argument);
+
+  auto graph = factory.spec ("a|graph", Concurrency::Exclusive, 0);
+  EXPECT_THROW (cache->acquire (graph, &pinned), std::invalid_argument);
+  EntryRef ref = cache->acquire (graph);
+  EXPECT_THROW (ref.poison (pinned), std::invalid_argument);
+
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().poisons, 0u);
+}
 
 TEST (onnxruntimeSessionCache, pinnedThreadEndsWithItsReplica)
 {
+  /** @brief Counts the exit of the thread that constructed it. */
+  struct ExitCounter {
+    std::atomic<int> *exits = nullptr;
+    ~ExitCounter ()
+    {
+      if (exits)
+        (*exits)++;
+    }
+  };
   std::atomic<int> exits{ 0 };
 
   FakeFactory factory;
@@ -819,7 +831,11 @@ TEST (onnxruntimeSessionCache, pinnedThreadEndsWithItsReplica)
   auto spec = factory.spec ("graph", Concurrency::Exclusive, 0);
   spec.pin_runs = true;
   EntryRef ref = cache->acquire (spec);
-  ref.lease ().run ([&exits] () { exit_counter.exits = &exits; });
+  ref.lease ().run ([&exits] () {
+    /* declared here, so it is constructed on the run thread and destroyed when that thread exits */
+    thread_local ExitCounter counter;
+    counter.exits = &exits;
+  });
   EXPECT_EQ (exits, 0);
 
   /* asap destroys the replica with its last consumer, and joins its thread first */
