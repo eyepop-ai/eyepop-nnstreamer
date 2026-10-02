@@ -1913,8 +1913,9 @@ gst_tensor_transform_transform (GstBaseTransform * trans,
     {
       GstMemoryMapInfo info;
       if (gst_memory_map (out_mem[i], &info, GST_MAP_WRITE)) {
-        // 3. Manually zero the memory
-        memset (info.data, 0, sizeof(GstTensorMetaInfo));
+        // 3. Manually zero the memory, where a stale header could be: a static
+        // tensor smaller than the header has no room for the rest of it
+        memset (info.data, 0, MIN (info.size, sizeof (GstTensorMetaInfo)));
         // 4. Unmap when done
         gst_memory_unmap (out_mem[i], &info);
       } else {

@@ -950,6 +950,134 @@ TEST (testTensorTransform, standProperties5_n)
   gst_harness_teardown (h);
 }
 
+/** @brief Guard bytes after every block of the guard allocator; more than a tensor header. */
+#define GUARD_BYTES (2 * sizeof (GstTensorMetaInfo))
+#define GUARD_FILL (0xa5)
+
+/**
+ * @brief An allocator whose memories are followed by guard bytes. The guard is inside
+ * the memory's maxsize but outside its size, so a map exposes exactly the requested
+ * bytes and a write past them lands in the guard, where freeing the memory checks it.
+ */
+typedef struct {
+  GstAllocator parent;
+  gint checked; /**< memories freed */
+  gint overruns; /**< memories freed with their guard overwritten */
+} GuardAllocator;
+
+/** @brief GuardAllocator class */
+typedef struct {
+  GstAllocatorClass parent_class;
+} GuardAllocatorClass;
+
+/** @brief One block of the guard allocator */
+typedef struct {
+  GuardAllocator *owner;
+  guint8 *data;
+  gsize size;
+} GuardBlock;
+
+G_DEFINE_TYPE (GuardAllocator, guard_allocator, GST_TYPE_ALLOCATOR);
+
+/** @brief Checks a freed block's guard and releases it */
+static void
+guard_block_free (gpointer user_data)
+{
+  GuardBlock *block = (GuardBlock *) user_data;
+  gboolean overrun = FALSE;
+  for (gsize i = 0; i < GUARD_BYTES; i++)
+    overrun |= block->data[block->size + i] != GUARD_FILL;
+  g_atomic_int_inc (&block->owner->checked);
+  if (overrun)
+    g_atomic_int_inc (&block->owner->overruns);
+  gst_object_unref (block->owner);
+  g_free (block->data);
+  g_free (block);
+}
+
+/** @brief Allocates size bytes followed by a guard */
+static GstMemory *
+guard_allocator_alloc (GstAllocator *allocator, gsize size, GstAllocationParams *params)
+{
+  GuardBlock *block = g_new0 (GuardBlock, 1);
+  (void) params;
+  block->owner = (GuardAllocator *) gst_object_ref (allocator);
+  block->size = size;
+  block->data = (guint8 *) g_malloc (size + GUARD_BYTES);
+  memset (block->data + size, GUARD_FILL, GUARD_BYTES);
+  return gst_memory_new_wrapped (
+      (GstMemoryFlags) 0, block->data, size + GUARD_BYTES, 0, size, block, guard_block_free);
+}
+
+/** @brief Never called: the memories are wrapped, and free themselves */
+static void
+guard_allocator_free (GstAllocator *allocator, GstMemory *memory)
+{
+  (void) allocator;
+  (void) memory;
+  g_assert_not_reached ();
+}
+
+/** @brief Initializes the GuardAllocator class */
+static void
+guard_allocator_class_init (GuardAllocatorClass *klass)
+{
+  GstAllocatorClass *allocator_class = GST_ALLOCATOR_CLASS (klass);
+  allocator_class->alloc = guard_allocator_alloc;
+  allocator_class->free = guard_allocator_free;
+}
+
+/** @brief Initializes a GuardAllocator */
+static void
+guard_allocator_init (GuardAllocator *self)
+{
+  (void) self;
+}
+
+/**
+ * @brief Test that tensor_transform writes nothing past an output smaller than a
+ * tensor header: it once zeroed a whole header's worth of every new output (BUG-284).
+ */
+TEST (testTensorTransform, typecastSmallOutputStaysInItsBuffer)
+{
+  GuardAllocator *guard = (GuardAllocator *) g_object_new (guard_allocator_get_type (), NULL);
+  GstAllocator *sysmem = gst_allocator_find (GST_ALLOCATOR_SYSMEM);
+  GstTensorsConfig config;
+  GstHarness *h;
+
+  gst_object_ref_sink (guard);
+  /* tensor_transform allocates its outputs from the default allocator */
+  gst_allocator_set_default (GST_ALLOCATOR (gst_object_ref (guard)));
+
+  h = gst_harness_new ("tensor_transform");
+  g_object_set (h->element, "mode", GTT_TYPECAST, "option", "uint8", NULL);
+  gst_tensors_config_init (&config);
+  config.info.num_tensors = 1U;
+  config.info.info[0].type = _NNS_UINT8;
+  gst_tensor_parse_dimension ("1", config.info.info[0].dimension);
+  config.rate_n = 0;
+  config.rate_d = 1;
+  gst_harness_set_src_caps (h, gst_tensors_caps_from_config (&config));
+
+  for (guint b = 0; b < 3U; b++) {
+    GstBuffer *in_buf = gst_harness_create_buffer (h, 1U);
+    gst_buffer_memset (in_buf, 0, (guint8) b, 1U);
+    EXPECT_EQ (gst_harness_push (h, in_buf), GST_FLOW_OK);
+    GstBuffer *out_buf = gst_harness_pull (h);
+    ASSERT_TRUE (out_buf != NULL);
+    EXPECT_EQ (gst_buffer_get_size (out_buf), 1U);
+    gst_buffer_unref (out_buf);
+  }
+  gst_harness_teardown (h);
+  gst_allocator_set_default (sysmem);
+
+  gint checked = g_atomic_int_get (&guard->checked);
+  gint overruns = g_atomic_int_get (&guard->overruns);
+  EXPECT_GE (checked, 3);
+  EXPECT_EQ (overruns, 0);
+  gst_object_unref (guard);
+}
+
 /**
  * @brief Test for tensor_transform typecast (uint8 > uint32)
  */

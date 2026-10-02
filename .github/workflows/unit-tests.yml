@@ -1,0 +1,74 @@
+name: Unit Tests
+
+# Builds this fork the way eyepop-worker's image build does, but with the tests
+# on, and runs them. The image build compiles nnstreamer with
+# -Denable-test=false and nothing else ran these tests, so a heap overrun in
+# tensor_transform shipped for months (BUG-284).
+#
+# The build runs inside eyepop-worker's base image, which carries everything
+# the worker builds this fork against: GStreamer, onnxruntime and
+# tensorflow2-lite. GPU tests stay off: they run only with NNS_TEST_GPU=1.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # A fork pull request gets no secrets, so the registry login would fail. Skip rather than fail.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      BUILD_IMAGE: us-west1-docker.pkg.dev/eyepop-staging/worker/base:dev-amd64
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Log in to the registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: us-west1-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GOOGLE_CREDS_JSON }}
+
+      - name: Build and run the unit tests in the worker base image
+        # The build directory must be called build: upstream tests find their
+        # models under <source root>/build/tests. They run as the runner's user,
+        # not as the image's root, so permission checks behave as on a desktop.
+        run: |
+          docker run --rm --entrypoint bash \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            "$BUILD_IMAGE" -euo pipefail -c '
+              meson setup build \
+                -Dwerror=false \
+                -Donnxruntime-support=enabled \
+                -Dtflite2-support=enabled \
+                -Dcaffe2-support=disabled \
+                -Dpython3-support=disabled \
+                -Denable-test=true \
+                -Dprefix=/usr \
+                -Denable-float16=true
+              meson compile -C build
+              meson test -C build --print-errorlogs
+            '
+
+      - name: Upload the test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-testlog
+          path: |
+            build/meson-logs/testlog.txt
+            build/meson-logs/testlog.junit.xml
+          if-no-files-found: ignore
