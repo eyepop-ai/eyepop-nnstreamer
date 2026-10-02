@@ -111,7 +111,9 @@ if gtest_dep.found()
       install_dir: unittest_install_dir
     )
 
-    test('unittest_plugins', unittest_plugins, env: testenv)
+    # Alone: it chmods and renames shared files under tests/test_models while it
+    # runs, so a test loading those models at the same time fails to open them.
+    test('unittest_plugins', unittest_plugins, env: testenv, is_parallel: false)
 
     # Run unittest_watchdog
     unittest_watchdog = executable('unittest_watchdog',
