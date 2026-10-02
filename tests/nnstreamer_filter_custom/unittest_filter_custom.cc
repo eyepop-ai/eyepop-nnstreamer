@@ -143,11 +143,13 @@ TEST (tensorFilterCustom, flexibleInvoke_p)
       "flexbible_filter", _custom_easy_filter_dynamic, &data, &info_in);
   ASSERT_EQ (ret, 0);
 
-  /* create a nnstreamer pipeline */
+  /* create a nnstreamer pipeline. join forwards the first EOS it gets on its active pad
+   * and drops everything after it, so of the three sources only the first to finish is
+   * sure to get all of its buffers through: each one sends the 6 buffers waited for. */
   pipeline = g_strdup_printf (
-      "videotestsrc num-buffers=3 ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=224,height=224,framerate=10/1 ! tensor_converter ! other/tensors,format=flexible ! j.sink_0 "
-      "videotestsrc num-buffers=3 ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=320,height=240,framerate=10/1 ! tensor_converter ! other/tensors,format=flexible ! j.sink_1 "
-      "videotestsrc num-buffers=3 ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=640,height=480,framerate=10/1 ! tensor_converter ! other/tensors,format=flexible ! j.sink_2 "
+      "videotestsrc num-buffers=6 ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=224,height=224,framerate=10/1 ! tensor_converter ! other/tensors,format=flexible ! j.sink_0 "
+      "videotestsrc num-buffers=6 ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=320,height=240,framerate=10/1 ! tensor_converter ! other/tensors,format=flexible ! j.sink_1 "
+      "videotestsrc num-buffers=6 ! videoconvert ! videoscale ! video/x-raw,format=RGB,width=640,height=480,framerate=10/1 ! tensor_converter ! other/tensors,format=flexible ! j.sink_2 "
       "join name=j ! other/tensors,format=flexible ! tensor_filter framework=custom-easy invoke-dynamic=TRUE model=flexbible_filter ! other/tensors,format=flexible ! tensor_sink name=sinkx sync=true");
 
   gstpipe = gst_parse_launch (pipeline, &err);
