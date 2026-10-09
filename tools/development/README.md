@@ -13,15 +13,6 @@ Check for existence of indent, and error out if not present
 ### pre-commit
 Verify what is about to be committed
 
-### reversion.sh
-Update version info for packaging, build, ...
-
-#### Usage
-
-```bash
-$ ./reversion.sh <old-major> <old-mid> <old-minor> <new-version(full)> <"Name <Email>">
-```
-
 ### count_test_cases.py
 Aggregate unit test result
 
