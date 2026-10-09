@@ -6,7 +6,6 @@ title: EyePop
 
 These instructions supplement the docs for installing the nnstreamer package for Ubuntu:
 * [With an existing .deb package](./getting-started-ubuntu-ppa.md)
-* [By building a .deb package locally](./getting-started-ubuntu-debuild.md)
 * [By building through meson/ninja](./getting-started-meson-build.md)
 
 See those docs for more details about `nnstreamer` internals.
@@ -93,42 +92,6 @@ meson -Dwerror=false -Donnxruntime-support=enabled -Dtf-support=disabled -Dcaffe
 ninja -C build
 
 ninja -C build test
-```
-
-### Building installable packages locally
-
-To build installable `.deb` packages locally, use `debuild`. Like `eyepop-ml-dev`, the EyePop build
-of `nnstreamer` uses platform identifiers to customize how packages get built.
-
-| Platform                       | CUDA Support? | Identifier                 |
-|--------------------------------|---------------|----------------------------|
-| Linux, `amd64`, Ubuntu 22.04   | yes           | `linux-amd64-jammy-cuda`   |
-| Linux, `amd64`, Ubuntu 22.04   | no            | `linux-amd64-jammy`        |
-| Linux, `aarch64`, Ubuntu 22.04 | no            | `linux-aarch64-jammy`      |
-
-To build for Ubuntu 22.04 on `amd64` with CUDA:
-
-```sh
-DEB_BUILD_OPTIONS="nocheck notest" debuild -b -us -uc -Plinux-amd64-jammy-cuda
-```
-
-To build for Ubuntu 22.04 on `amd64` without CUDA:
-
-```sh
-DEB_BUILD_OPTIONS="nocheck notest" debuild -b -us -uc -Plinux-amd64-jammy
-```
-
-To build for Ubuntu 22.04 on `aarch64`:
-
-```sh
-DEB_BUILD_OPTIONS="nocheck notest" debuild -b -us -uc -Plinux-aarch64-jammy
-```
-
-This will generate a series of `.deb` packages in the repo's parent directory. To install them with
-`apt`, run the following:
-
-```sh
-sudo apt install ../nnstreamer*.deb
 ```
 
 ## Build/install instructions (Windows on ARM)
