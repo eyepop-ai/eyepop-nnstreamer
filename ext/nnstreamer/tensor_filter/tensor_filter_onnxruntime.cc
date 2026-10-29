@@ -117,6 +117,8 @@ typedef int (*cudaStreamSynchronize_t) ( cudaStream_t_ stream );
 typedef int (*cudaThreadExchangeStreamCaptureMode_t) ( cudaStreamCaptureMode_ * mode );
 typedef int (*cudaMemGetInfo_t) ( size_t *free, size_t *total );
 typedef int (*cudaSetDevice_t) ( int device );
+typedef int (*cudaGetDevice_t) ( int *device );
+typedef int (*cudaGetDeviceCount_t) ( int *count );
 static cudaMalloc_t cudaMalloc_ = nullptr;
 static cudaFree_t cudaFree_ = nullptr;
 static cudaMemcpyAsync_t cudaMemcpyAsync_ = nullptr;
@@ -126,6 +128,8 @@ static cudaStreamSynchronize_t cudaStreamSynchronize_ = nullptr;
 static cudaThreadExchangeStreamCaptureMode_t cudaThreadExchangeStreamCaptureMode_ = nullptr;
 static cudaMemGetInfo_t cudaMemGetInfo_ = nullptr;
 static cudaSetDevice_t cudaSetDevice_ = nullptr;
+static cudaGetDevice_t cudaGetDevice_ = nullptr;
+static cudaGetDeviceCount_t cudaGetDeviceCount_ = nullptr;
 
 static gboolean cudaMemcpy_initialized = FALSE;
 
@@ -192,6 +196,18 @@ static void init_cudaMemcpy() {
               "cudaSetDevice",
               reinterpret_cast<gpointer *> (&cudaSetDevice_))) {
         g_warning("g_module_symbol( ... \"cudaSetDevice\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaGetDevice",
+              reinterpret_cast<gpointer *> (&cudaGetDevice_))) {
+        g_warning("g_module_symbol( ... \"cudaGetDevice\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaGetDeviceCount",
+              reinterpret_cast<gpointer *> (&cudaGetDeviceCount_))) {
+        g_warning("g_module_symbol( ... \"cudaGetDeviceCount\" ...) NOT FOUND");
       }
     }
   }
@@ -301,38 +317,86 @@ process_provider_option (const char *key)
   return nullptr;
 }
 
-/** @brief The CUDA device ORT_PROVIDER_OPTION_device_id selects for TensorRT and CUDA, 0 by default. */
+/**
+ * @brief The CUDA device ORT_PROVIDER_OPTION_device_id selects for TensorRT and CUDA,
+ * 0 when it is not set. A value that is not a device ordinal, or names a device this
+ * process does not see, is an error rather than another device.
+ */
 static int
-process_cuda_device ()
+cuda_device_from_options ()
 {
-  static const int device = [] () {
-    const std::string *device_id = process_provider_option ("device_id");
-    if (!device_id)
-      return 0;
-    guint64 parsed = 0;
-    if (!g_ascii_string_to_unsigned (device_id->c_str (), 10, 0, G_MAXINT, &parsed, nullptr)) {
-      g_warning ("ORT_PROVIDER_OPTION_device_id=%s is not a CUDA device ordinal, using device 0", device_id->c_str ());
-      return 0;
-    }
-    return static_cast<int> (parsed);
-  }();
-  return device;
+  const std::string *device_id = process_provider_option ("device_id");
+  if (!device_id)
+    return 0;
+  guint64 parsed = 0;
+  if (!g_ascii_string_to_unsigned (device_id->c_str (), 10, 0, G_MAXINT, &parsed, nullptr)) {
+    throw std::invalid_argument ("ORT_PROVIDER_OPTION_device_id=" + *device_id
+                                 + " is not a CUDA device ordinal");
+  }
+  int count = 0;
+  if (cudaGetDeviceCount_ && cudaGetDeviceCount_ (&count) == 0 && parsed >= static_cast<guint64> (count)) {
+    throw std::invalid_argument ("ORT_PROVIDER_OPTION_device_id=" + *device_id + " selects a CUDA device this process does not see ("
+                                 + std::to_string (count) + " visible)");
+  }
+  return static_cast<int> (parsed);
 }
 
 /**
- * @brief Makes device the calling thread's current CUDA device. Streams and memory are
- * created on the current device, and a stream is only used from it; ORT selects its
- * device only inside Run().
+ * @brief Makes a CUDA device the calling thread's current device for its lifetime and
+ * restores the device the thread had. Streams and memory are created on the current
+ * device, and a stream is only used from it; ORT selects its device only inside its own
+ * calls, and the streaming threads the filter runs on are shared with other elements.
  */
-static void
-bind_cuda_device (int device)
+class CudaDeviceScope
 {
-  if (device < 0 || !cudaSetDevice_)
-    return;
-  int cudaError = cudaSetDevice_ (device);
-  if (cudaError != 0)
-    g_warning ("cudaSetDevice(%d) failed: %d", device, cudaError);
-}
+  public:
+  /** @brief device < 0 binds nothing. */
+  explicit CudaDeviceScope (int device)
+  {
+    if (device < 0)
+      return;
+    if (!cudaSetDevice_ || !cudaGetDevice_) {
+      /* without the symbols the thread stays on device 0, which is only right for device 0 */
+      ok = device == 0;
+      return;
+    }
+    if (cudaGetDevice_ (&previous) != 0) {
+      ok = false;
+      return;
+    }
+    if (previous == device)
+      return;
+    if (cudaSetDevice_ (device) != 0) {
+      ok = false;
+      return;
+    }
+    restore = true;
+  }
+  ~CudaDeviceScope ()
+  {
+    if (restore)
+      cudaSetDevice_ (previous);
+  }
+  CudaDeviceScope (const CudaDeviceScope &) = delete;
+  CudaDeviceScope &operator= (const CudaDeviceScope &) = delete;
+
+  /** @brief Whether the thread is on the device; CUDA work for it must not run otherwise. */
+  bool bound () const
+  {
+    return ok;
+  }
+  /** @brief Throws unless the thread is on the device. */
+  void require (int device) const
+  {
+    if (!ok)
+      throw std::runtime_error ("ERROR selecting CUDA device " + std::to_string (device));
+  }
+
+  private:
+  int previous = 0;
+  bool ok = true;
+  bool restore = false;
+};
 
 static const gchar *onnx_accl_support[] = { ACCL_CPU_STR, ACCL_GPU_STR, ACCL_NPU_STR, nullptr };
 
@@ -676,9 +740,11 @@ OrtReplica::OrtReplica (const SessionPlan &plan)
       device (plan.use_cuda () ? plan.device : -1)
 {
   size_t i, num_inputs, num_outputs;
+  /* ORT's providers select the device when they are created and leave it current */
+  CudaDeviceScope deviceScope (device);
 
   if (use_cuda) {
-    bind_cuda_device (device);
+    deviceScope.require (device);
     if (!cudaStreamCreateWithFlags_) {
       throw std::runtime_error ("ERROR creating CUDA stream: libcudart not loaded");
     }
@@ -785,10 +851,11 @@ OrtReplica::~OrtReplica ()
 IoState::IoState (OrtReplica &replica_, bool own_stream)
     : replica (replica_)
 {
+  CudaDeviceScope deviceScope (replica.device);
+  deviceScope.require (replica.device);
   ioBinding = Ort::IoBinding (replica.session);
   if (replica.use_cuda) {
     allocator = Ort::Allocator (replica.session, replica.memInfo);
-    bind_cuda_device (replica.device);
     if (own_stream) {
       int cudaError = cudaStreamCreateWithFlags_(&cudaStream, cudaStreamNonBlocking_);
       if (cudaError != 0) {
@@ -1133,11 +1200,12 @@ IoState::invoke (GstTensorFilterProperties *prop,
 #endif
 
   cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
+  /* a pinned run thread or another consumer's thread may run this */
+  CudaDeviceScope deviceScope (replica.device);
+  deviceScope.require (replica.device);
 
   TIME_IT([&]{
     if (replica.use_cuda) {
-      /* a pinned run thread or another consumer's thread may run this */
-      bind_cuda_device (replica.device);
       cudaThreadExchangeStreamCaptureMode_(&mode);
     }
     TIME_IT([&] {
@@ -1198,8 +1266,8 @@ cuda_memory_used (int device)
   if (device < 0 || !cudaMemGetInfo_) {
     return std::nullopt;
   }
-  bind_cuda_device (device);
-  if (cudaMemGetInfo_ (&free_bytes, &total_bytes) != 0) {
+  CudaDeviceScope deviceScope (device);
+  if (!deviceScope.bound () || cudaMemGetInfo_ (&free_bytes, &total_bytes) != 0) {
     return std::nullopt;
   }
   return total_bytes - free_bytes;
@@ -1449,7 +1517,10 @@ class DeviceStaging
   bool upload (const GstTensorMemory *input, size_t inputs, const GstTensorMemory *output, size_t outputs)
   {
     ThreadLocalCaptureMode capture;
-    bind_cuda_device (device);
+    /* unstaged, the inference copies through the replica's own binding */
+    CudaDeviceScope deviceScope (device);
+    if (!deviceScope.bound ())
+      return false;
     if (!stream && cudaStreamCreateWithFlags_ (&stream, cudaStreamNonBlocking_) != 0) {
       stream = nullptr;
       return false;
@@ -1471,7 +1542,8 @@ class DeviceStaging
   void download (GstTensorMemory *output, size_t outputs)
   {
     ThreadLocalCaptureMode capture;
-    bind_cuda_device (device);
+    CudaDeviceScope deviceScope (device);
+    deviceScope.require (device);
     for (size_t i = 0; i < outputs; i++) {
       cudaMemcpyAsync_ (output[i].data, outputs_[i], output[i].size, cudaMemcpyDeviceToHost_, stream);
     }
@@ -1773,7 +1845,7 @@ onnxruntime_subplugin::resolvePlan (const GstTensorFilterProperties *prop, bool 
     plan.ep = OrtEp::Cpu;
   }
   if (plan.use_cuda ()) {
-    plan.device = process_cuda_device ();
+    plan.device = cuda_device_from_options ();
   }
 
   for (guint i = 0; i < prop->output_meta.num_tensors; i++) {
