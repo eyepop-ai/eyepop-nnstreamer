@@ -116,6 +116,9 @@ typedef int (*cudaStreamDestroy_t) ( cudaStream_t_ stream );
 typedef int (*cudaStreamSynchronize_t) ( cudaStream_t_ stream );
 typedef int (*cudaThreadExchangeStreamCaptureMode_t) ( cudaStreamCaptureMode_ * mode );
 typedef int (*cudaMemGetInfo_t) ( size_t *free, size_t *total );
+typedef int (*cudaSetDevice_t) ( int device );
+typedef int (*cudaGetDevice_t) ( int *device );
+typedef int (*cudaGetDeviceCount_t) ( int *count );
 static cudaMalloc_t cudaMalloc_ = nullptr;
 static cudaFree_t cudaFree_ = nullptr;
 static cudaMemcpyAsync_t cudaMemcpyAsync_ = nullptr;
@@ -124,6 +127,9 @@ static cudaStreamDestroy_t cudaStreamDestroy_ = nullptr;
 static cudaStreamSynchronize_t cudaStreamSynchronize_ = nullptr;
 static cudaThreadExchangeStreamCaptureMode_t cudaThreadExchangeStreamCaptureMode_ = nullptr;
 static cudaMemGetInfo_t cudaMemGetInfo_ = nullptr;
+static cudaSetDevice_t cudaSetDevice_ = nullptr;
+static cudaGetDevice_t cudaGetDevice_ = nullptr;
+static cudaGetDeviceCount_t cudaGetDeviceCount_ = nullptr;
 
 static gboolean cudaMemcpy_initialized = FALSE;
 
@@ -184,6 +190,24 @@ static void init_cudaMemcpy() {
               "cudaMemGetInfo",
               reinterpret_cast<gpointer *> (&cudaMemGetInfo_))) {
         g_warning("g_module_symbol( ... \"cudaMemGetInfo\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaSetDevice",
+              reinterpret_cast<gpointer *> (&cudaSetDevice_))) {
+        g_warning("g_module_symbol( ... \"cudaSetDevice\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaGetDevice",
+              reinterpret_cast<gpointer *> (&cudaGetDevice_))) {
+        g_warning("g_module_symbol( ... \"cudaGetDevice\" ...) NOT FOUND");
+      }
+      if (!g_module_symbol(
+              cuda_module,
+              "cudaGetDeviceCount",
+              reinterpret_cast<gpointer *> (&cudaGetDeviceCount_))) {
+        g_warning("g_module_symbol( ... \"cudaGetDeviceCount\" ...) NOT FOUND");
       }
     }
   }
@@ -281,6 +305,98 @@ shared_env ()
   static Ort::Env *env = new Ort::Env (process_options ().log_level, "nnstreamer_onnxruntime");
   return *env;
 }
+
+/** @brief The value of an ORT_PROVIDER_OPTION_<key> environment variable, or nullptr. */
+static const std::string *
+process_provider_option (const char *key)
+{
+  for (const auto &option : process_options ().provider_options) {
+    if (option.first == key)
+      return &option.second;
+  }
+  return nullptr;
+}
+
+/**
+ * @brief The CUDA device ORT_PROVIDER_OPTION_device_id selects for TensorRT and CUDA,
+ * 0 when it is not set. A value that is not a device ordinal, or names a device this
+ * process does not see, is an error rather than another device.
+ */
+static int
+cuda_device_from_options ()
+{
+  const std::string *device_id = process_provider_option ("device_id");
+  if (!device_id)
+    return 0;
+  guint64 parsed = 0;
+  if (!g_ascii_string_to_unsigned (device_id->c_str (), 10, 0, G_MAXINT, &parsed, nullptr)) {
+    throw std::invalid_argument ("ORT_PROVIDER_OPTION_device_id=" + *device_id
+                                 + " is not a CUDA device ordinal");
+  }
+  int count = 0;
+  if (cudaGetDeviceCount_ && cudaGetDeviceCount_ (&count) == 0 && parsed >= static_cast<guint64> (count)) {
+    throw std::invalid_argument ("ORT_PROVIDER_OPTION_device_id=" + *device_id + " selects a CUDA device this process does not see ("
+                                 + std::to_string (count) + " visible)");
+  }
+  return static_cast<int> (parsed);
+}
+
+/**
+ * @brief Makes a CUDA device the calling thread's current device for its lifetime and
+ * restores the device the thread had. Streams and memory are created on the current
+ * device, and a stream is only used from it; ORT selects its device only inside its own
+ * calls, and the streaming threads the filter runs on are shared with other elements.
+ */
+class CudaDeviceScope
+{
+  public:
+  /** @brief device < 0 binds nothing. */
+  explicit CudaDeviceScope (int device)
+  {
+    if (device < 0)
+      return;
+    if (!cudaSetDevice_ || !cudaGetDevice_) {
+      /* without them the thread's current device is unknown, even for device 0 */
+      ok = false;
+      return;
+    }
+    if (cudaGetDevice_ (&previous) != 0) {
+      ok = false;
+      return;
+    }
+    if (previous == device)
+      return;
+    if (cudaSetDevice_ (device) != 0) {
+      ok = false;
+      return;
+    }
+    restore = true;
+  }
+  ~CudaDeviceScope ()
+  {
+    if (restore)
+      cudaSetDevice_ (previous);
+  }
+  CudaDeviceScope (const CudaDeviceScope &) = delete;
+  CudaDeviceScope &operator= (const CudaDeviceScope &) = delete;
+
+  /** @brief Whether the thread is on the device; CUDA work for it must not run otherwise. */
+  bool bound () const
+  {
+    return ok;
+  }
+  /** @brief Throws unless the thread is on the device. */
+  void require (int device) const
+  {
+    if (!ok)
+      throw std::runtime_error ("ERROR selecting CUDA device " + std::to_string (device));
+  }
+
+  private:
+  int previous = 0;
+  bool ok = true;
+  bool restore = false;
+};
 
 static const gchar *onnx_accl_support[] = { ACCL_CPU_STR, ACCL_GPU_STR, ACCL_NPU_STR, nullptr };
 
@@ -395,6 +511,7 @@ class OrtReplica : public Replica
 
   const std::string model_path;
   const bool use_cuda;
+  const int device; /**< the CUDA device, -1 without CUDA */
   cudaStream_t_ cudaStream = nullptr;
   Ort::Session session{ nullptr };
   Ort::MemoryInfo memInfo{ nullptr };
@@ -479,6 +596,15 @@ OrtReplica::createTensorRtOptions (
     keys.emplace_back("trt_ep_context_file_path");
     values.emplace_back(trt_dump_ep_context_model);
     values.emplace_back(trt_ep_context_file_path);
+  }
+
+  /* a Jetson's DLA cores; layers the DLA cannot run fall back to the GPU */
+  for (const char *dla_option : { "trt_dla_enable", "trt_dla_core" }) {
+    if (const std::string *value = process_provider_option (dla_option)) {
+      keys.emplace_back (dla_option);
+      values.emplace_back (value->c_str ());
+      g_info ("onnxruntime_subplugin::setAccelerator tensorrt %s=%s", dla_option, value->c_str ());
+    }
   }
 
   Ort::ThrowOnError (api.UpdateTensorRTProviderOptions (
@@ -610,11 +736,15 @@ OrtReplica::createSessionOptions (const SessionPlan &plan)
 }
 
 OrtReplica::OrtReplica (const SessionPlan &plan)
-    : model_path (plan.model_path), use_cuda (plan.use_cuda ())
+    : model_path (plan.model_path), use_cuda (plan.use_cuda ()),
+      device (plan.use_cuda () ? plan.device : -1)
 {
   size_t i, num_inputs, num_outputs;
+  /* ORT's providers select the device when they are created and leave it current */
+  CudaDeviceScope deviceScope (device);
 
   if (use_cuda) {
+    deviceScope.require (device);
     if (!cudaStreamCreateWithFlags_) {
       throw std::runtime_error ("ERROR creating CUDA stream: libcudart not loaded");
     }
@@ -721,6 +851,8 @@ OrtReplica::~OrtReplica ()
 IoState::IoState (OrtReplica &replica_, bool own_stream)
     : replica (replica_)
 {
+  CudaDeviceScope deviceScope (replica.device);
+  deviceScope.require (replica.device);
   ioBinding = Ort::IoBinding (replica.session);
   if (replica.use_cuda) {
     allocator = Ort::Allocator (replica.session, replica.memInfo);
@@ -1068,6 +1200,9 @@ IoState::invoke (GstTensorFilterProperties *prop,
 #endif
 
   cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
+  /* a pinned run thread or another consumer's thread may run this */
+  CudaDeviceScope deviceScope (replica.device);
+  deviceScope.require (replica.device);
 
   TIME_IT([&]{
     if (replica.use_cuda) {
@@ -1128,7 +1263,11 @@ static std::optional<uint64_t>
 cuda_memory_used (int device)
 {
   size_t free_bytes = 0, total_bytes = 0;
-  if (device != 0 || !cudaMemGetInfo_ || cudaMemGetInfo_ (&free_bytes, &total_bytes) != 0) {
+  if (device < 0 || !cudaMemGetInfo_) {
+    return std::nullopt;
+  }
+  CudaDeviceScope deviceScope (device);
+  if (!deviceScope.bound () || cudaMemGetInfo_ (&free_bytes, &total_bytes) != 0) {
     return std::nullopt;
   }
   return total_bytes - free_bytes;
@@ -1357,7 +1496,9 @@ class ThreadLocalCaptureMode
 class DeviceStaging
 {
   public:
-  DeviceStaging () = default;
+  explicit DeviceStaging (int device_) : device (device_)
+  {
+  }
   DeviceStaging (const DeviceStaging &) = delete;
   DeviceStaging &operator= (const DeviceStaging &) = delete;
 
@@ -1376,6 +1517,10 @@ class DeviceStaging
   bool upload (const GstTensorMemory *input, size_t inputs, const GstTensorMemory *output, size_t outputs)
   {
     ThreadLocalCaptureMode capture;
+    /* unstaged, the inference copies through the replica's own binding */
+    CudaDeviceScope deviceScope (device);
+    if (!deviceScope.bound ())
+      return false;
     if (!stream && cudaStreamCreateWithFlags_ (&stream, cudaStreamNonBlocking_) != 0) {
       stream = nullptr;
       return false;
@@ -1397,6 +1542,8 @@ class DeviceStaging
   void download (GstTensorMemory *output, size_t outputs)
   {
     ThreadLocalCaptureMode capture;
+    CudaDeviceScope deviceScope (device);
+    deviceScope.require (device);
     for (size_t i = 0; i < outputs; i++) {
       cudaMemcpyAsync_ (output[i].data, outputs_[i], output[i].size, cudaMemcpyDeviceToHost_, stream);
     }
@@ -1437,6 +1584,7 @@ class DeviceStaging
   std::vector<size_t> inputSizes;
   std::vector<void *> outputs_;
   std::vector<size_t> outputSizes;
+  const int device;
   cudaStream_t_ stream = nullptr;
 };
 
@@ -1696,6 +1844,9 @@ onnxruntime_subplugin::resolvePlan (const GstTensorFilterProperties *prop, bool 
   } else {
     plan.ep = OrtEp::Cpu;
   }
+  if (plan.use_cuda ()) {
+    plan.device = cuda_device_from_options ();
+  }
 
   for (guint i = 0; i < prop->output_meta.num_tensors; i++) {
     GstTensorInfo *tensor_info = gst_tensors_info_get_nth_info (
@@ -1834,7 +1985,7 @@ onnxruntime_subplugin::invokeOnce (GstTensorFilterProperties *prop,
 #endif
   if (staged) {
     if (!staging) {
-      staging = std::make_unique<DeviceStaging> ();
+      staging = std::make_unique<DeviceStaging> (spec.device);
     }
     staged = staging->upload (input, inputNode.count, output, outputNode.count);
   }
