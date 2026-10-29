@@ -356,8 +356,8 @@ class CudaDeviceScope
     if (device < 0)
       return;
     if (!cudaSetDevice_ || !cudaGetDevice_) {
-      /* without the symbols the thread stays on device 0, which is only right for device 0 */
-      ok = device == 0;
+      /* without them the thread's current device is unknown, even for device 0 */
+      ok = false;
       return;
     }
     if (cudaGetDevice_ (&previous) != 0) {
