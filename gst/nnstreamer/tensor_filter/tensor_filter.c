@@ -1175,6 +1175,8 @@ gst_tensor_filter_watchdog_trigger (gpointer ptr)
 
   ml_logd  ("Suspend watchdog triggered. Unload the NN framework.");
   gst_tensor_filter_common_unload_fw (priv);
+  /* the unloaded model holds no accelerator memory any more */
+  gst_tensor_filter_common_notify_opened_model (priv);
 
   return FALSE;
 }

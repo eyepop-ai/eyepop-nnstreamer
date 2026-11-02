@@ -1034,8 +1034,9 @@ gst_tensor_filter_install_properties (GObjectClass * gobject_class)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_EXECUTION_PROVIDER,
       g_param_spec_string ("execution-provider", "Execution provider",
-          "The backend the opened model runs on, as the framework reports it "
-          "(onnxruntime: tensorrt, cuda, qnn, rocm, openvino or cpu). "
+          "The execution provider the opened model's session was created with, as the "
+          "framework reports it (onnxruntime: tensorrt, cuda, qnn, rocm, openvino or cpu). "
+          "The runtime may still place some of the model's operations on the CPU. "
           "NULL while no model is open or when the framework does not report it.",
           NULL, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_ACCELERATOR_MEMORY_MIB,
@@ -2269,11 +2270,11 @@ gst_tensor_filter_common_get_property (GstTensorFilterPrivate * priv,
       break;
     case PROP_EXECUTION_PROVIDER:
       g_value_set_string (value,
-          prop->fw_opened ? priv->info.execution_provider : NULL);
+          prop->fw_opened ? priv->opened_execution_provider : NULL);
       break;
     case PROP_ACCELERATOR_MEMORY_MIB:
       g_value_set_uint64 (value,
-          prop->fw_opened ? priv->info.accelerator_memory_mib : 0);
+          prop->fw_opened ? priv->opened_accelerator_memory_mib : 0);
       break;
     default:
       /* unknown property */
@@ -2504,6 +2505,8 @@ done:
   gst_tensors_info_free (&out_info);
 }
 
+static void query_accelerator_memory (GstTensorFilterPrivate * priv);
+
 /**
  * @brief Open NN framework.
  */
@@ -2539,9 +2542,6 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
     }
 
     if (priv->prop.fw_opened) {
-      /* a sub-plugin that does not report them leaves them empty */
-      priv->info.execution_provider = NULL;
-      priv->info.accelerator_memory_mib = 0;
       /* Update the framework info once it has been opened */
       if (GST_TF_FW_V1 (priv->fw) &&
           priv->fw->getFrameworkInfo (priv->fw, &priv->prop, priv->privateData,
@@ -2551,6 +2551,7 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
       }
     }
     if (priv->prop.fw_opened) {
+      query_accelerator_memory (priv);
       gst_tensor_filter_common_notify_opened_model (priv);
     }
 
@@ -2561,6 +2562,29 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
           G_GINT64_FORMAT " us", priv->prop.fwname, priv->prop.model_files[0],
           end_time - start_time);
     }
+  }
+}
+
+/**
+ * @brief Asks the opened subplugin for the execution provider and the accelerator
+ * memory of its model; a subplugin that does not answer GET_ACCELERATOR_MEMORY
+ * reports none.
+ */
+static void
+query_accelerator_memory (GstTensorFilterPrivate * priv)
+{
+  GstTensorFilterFrameworkEventData data;
+
+  priv->opened_execution_provider = NULL;
+  priv->opened_accelerator_memory_mib = 0;
+  if (!GST_TF_FW_V1 (priv->fw) || !priv->fw->eventHandler) {
+    return;
+  }
+  memset (&data, 0, sizeof (data));
+  if (priv->fw->eventHandler (priv->fw, &priv->prop, priv->privateData,
+          GET_ACCELERATOR_MEMORY, &data) == 0) {
+    priv->opened_execution_provider = data.execution_provider;
+    priv->opened_accelerator_memory_mib = data.accelerator_memory_mib;
   }
 }
 
@@ -2592,6 +2616,8 @@ gst_tensor_filter_common_unload_fw (GstTensorFilterPrivate * priv)
     }
     priv->prop.fw_opened = FALSE;
     priv->privateData = NULL;
+    priv->opened_execution_provider = NULL;
+    priv->opened_accelerator_memory_mib = 0;
   }
 }
 

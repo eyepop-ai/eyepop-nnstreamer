@@ -1614,7 +1614,7 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   bool has_openvino;
   accl_hw has_accelerator;
 
-  /** @brief Of the opened model: the provider its session runs on, and the accelerator memory it holds (estimated). */
+  /** @brief Of the opened model: the provider its session was created with, and the accelerator memory it holds (estimated). */
   const char *execution_provider;
   uint64_t accelerator_memory_mib;
 
@@ -2124,9 +2124,6 @@ onnxruntime_subplugin::getFrameworkInfo (GstTensorFilterFrameworkInfo &info)
     info.accl_auto = has_accelerator;
     info.accl_default = has_accelerator;
   }
-  /* set once the model is open, see configure_instance */
-  info.execution_provider = execution_provider;
-  info.accelerator_memory_mib = accelerator_memory_mib;
 }
 
 /**getInputDimension
@@ -2161,6 +2158,11 @@ onnxruntime_subplugin::eventHandler (event_ops ops, GstTensorFilterFrameworkEven
   if (ops == SET_CONTEXT && !shared && data.context_type
       && g_str_equal (data.context_type, NNS_ONNXRUNTIME_SESSION_CACHE_CONTEXT_TYPE)) {
     /* opened before the pipeline's cache was known; reopen to join it */
+    return 0;
+  }
+  if (ops == GET_ACCELERATOR_MEMORY && configured) {
+    data.execution_provider = execution_provider;
+    data.accelerator_memory_mib = accelerator_memory_mib;
     return 0;
   }
   return -ENOENT;

@@ -175,6 +175,10 @@ typedef struct _GstTensorFilterPrivate
 
   GstTensorFilterCombination combi;
   nns_watchdog_h watchdog_h; /**< Watchdog to monitor occasional inputs */;
+
+  /* what the subplugin answered GET_ACCELERATOR_MEMORY after the model was last opened; NULL and 0 while it is not open */
+  const char *opened_execution_provider;
+  uint64_t opened_accelerator_memory_mib;
 } GstTensorFilterPrivate;
 
 /**

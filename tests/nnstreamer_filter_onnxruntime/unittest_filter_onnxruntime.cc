@@ -641,6 +641,39 @@ TEST (nnstreamerFilterOnnxRuntime, reportsAcceleratorMemoryOfTheOpenModel)
 }
 
 /**
+ * @brief A model the suspend watchdog unloads reports nothing, and says so with a notify.
+ */
+TEST (nnstreamerFilterOnnxRuntime, suspendedModelReportsNothing)
+{
+  g_autofree gchar *model_file = NULL;
+  ASSERT_TRUE (_GetModelFilePath (&model_file));
+  GstElement *gstpipe = _NewOrangePipeline (
+      "tensor_filter name=f framework=onnxruntime suspend=100 ! tensor_sink name=sink0", NULL);
+  ASSERT_TRUE (gstpipe != nullptr);
+  GstElement *filter = gst_bin_get_by_name (GST_BIN (gstpipe), "f");
+  ASSERT_TRUE (filter != nullptr);
+  gint notifies = 0;
+  g_signal_connect (filter, "notify::accelerator-memory-mib",
+      G_CALLBACK (_CountAcceleratorMemoryNotify), &notifies);
+  g_object_set (filter, "model", model_file, NULL);
+
+  _PlayToEos (gstpipe);
+  gint notifies_while_open = g_atomic_int_get (&notifies);
+  gchar *provider = NULL;
+  /* no more data arrives after EOS, so the watchdog unloads the model */
+  for (int i = 0; i < 100 && g_atomic_int_get (&notifies) == notifies_while_open; i++) {
+    g_usleep (20000);
+  }
+  EXPECT_GT (g_atomic_int_get (&notifies), notifies_while_open);
+  g_object_get (filter, "execution-provider", &provider, NULL);
+  EXPECT_EQ (provider, nullptr);
+
+  EXPECT_EQ (setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT), 0);
+  gst_object_unref (filter);
+  gst_object_unref (gstpipe);
+}
+
+/**
  * @brief A filter with a different I/O contract gets its own session.
  */
 TEST (nnstreamerFilterOnnxRuntimeSessionCache, differentIoContractGetsItsOwnSession)
