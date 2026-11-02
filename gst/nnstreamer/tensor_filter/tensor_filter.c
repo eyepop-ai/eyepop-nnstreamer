@@ -1937,6 +1937,8 @@ gst_tensor_filter_stop (GstBaseTransform * trans)
     GST_OBJECT_UNLOCK (self);
   }
   gst_tensor_filter_common_close_fw (priv);
+  /* the model is closed: it holds no accelerator memory any more */
+  gst_tensor_filter_common_notify_opened_model (priv);
 
   return TRUE;
 }

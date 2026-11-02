@@ -109,7 +109,9 @@ enum
   PROP_LATENCY_REPORT,
   PROP_INVOKE_DYNAMIC,
   PROP_CONFIG,
-  PROP_SUSPEND
+  PROP_SUSPEND,
+  PROP_EXECUTION_PROVIDER,
+  PROP_ACCELERATOR_MEMORY_MIB
 };
 
 /**
@@ -286,6 +288,12 @@ extern NNS_API void gst_tensor_filter_common_unload_fw (GstTensorFilterPrivate *
  * @brief Close NN framework.
  */
 extern NNS_API void gst_tensor_filter_common_close_fw (GstTensorFilterPrivate * priv);
+
+/**
+ * @brief Notifies execution-provider and accelerator-memory-mib after a model was opened
+ * or closed. Never while the element is being finalized.
+ */
+extern NNS_API void gst_tensor_filter_common_notify_opened_model (GstTensorFilterPrivate * priv);
 
 /**
  * @brief Get neural network framework name from given model file. This does not guarantee the framework is available on the target device.

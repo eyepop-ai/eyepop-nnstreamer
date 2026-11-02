@@ -31,6 +31,16 @@ G_BEGIN_DECLS
 #define NNS_ONNXRUNTIME_SESSION_CACHE_FIELD_MAX_BYTES "max-bytes"
 #define NNS_ONNXRUNTIME_SESSION_CACHE_FIELD_MAX_REPLICAS_PER_KEY "max-replicas-per-key"
 
+/**
+ * @brief An onnxruntime tensor_filter with an open model reports, in its read-only
+ * "execution-provider" and "accelerator-memory-mib" properties, the provider its session
+ * runs on and the accelerator memory it holds: an estimate, the size of the model's
+ * weights plus NNS_ONNXRUNTIME_SESSION_ALLOWANCE_MIB, 0 on "cpu", whether the session is
+ * shared or not. Both notify when the model is opened and when the filter stops.
+ */
+/** @brief The memory a session holds beyond its weights (activations, workspace), as estimated. */
+#define NNS_ONNXRUNTIME_SESSION_ALLOWANCE_MIB 256
+
 /** @brief Counters of one cache; the gauges (entries .. consumers) are current values. */
 typedef struct
 {

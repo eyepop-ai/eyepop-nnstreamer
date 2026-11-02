@@ -171,6 +171,8 @@ typedef struct _GstTensorFilterFrameworkInfo
   accl_hw accl_auto;  /**< accelerator to be used in auto mode (acceleration to be used but accelerator is not specified for the filter) - default -1 implies use first entry from hw_list. */
   accl_hw accl_default;   /**< accelerator to be used by default (valid user input is not provided) - default -1 implies use first entry from hw_list. */
   const GstTensorFilterFrameworkStatistics *statistics;  /**< usage statistics by the framework. This is shared across all opened instances of this framework. */
+  const char *execution_provider; /**< Of an opened instance: the backend its model runs on, such as "cuda" or "cpu". NULL when the framework does not report it. Subplugin is supposed to allocate/deallocate. Read as tensor_filter's "execution-provider" property. */
+  uint64_t accelerator_memory_mib; /**< Of an opened instance: the accelerator memory its model holds, in MiB, 0 on the CPU or when the framework does not report it. May be an estimate. Read as tensor_filter's "accelerator-memory-mib" property. */
 } GstTensorFilterFrameworkInfo;
 
 /**

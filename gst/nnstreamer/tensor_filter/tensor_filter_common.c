@@ -1032,6 +1032,18 @@ gst_tensor_filter_install_properties (GObjectClass * gobject_class)
           "The state of the pipeline does not change. "
           "Default 0 means no suspend.", 0, G_MAXUINT32, 0,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_EXECUTION_PROVIDER,
+      g_param_spec_string ("execution-provider", "Execution provider",
+          "The backend the opened model runs on, as the framework reports it "
+          "(onnxruntime: tensorrt, cuda, qnn, rocm, openvino or cpu). "
+          "NULL while no model is open or when the framework does not report it.",
+          NULL, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_ACCELERATOR_MEMORY_MIB,
+      g_param_spec_uint64 ("accelerator-memory-mib", "Accelerator memory (MiB)",
+          "The accelerator memory the opened model holds, in MiB, as the framework "
+          "reports it; may be an estimate. 0 on the CPU, while no model is open, or "
+          "when the framework does not report it. Notifies when a model is opened or closed.",
+          0, G_MAXUINT64, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 }
 
 /**
@@ -2255,6 +2267,14 @@ gst_tensor_filter_common_get_property (GstTensorFilterPrivate * priv,
     case PROP_SUSPEND:
       g_value_set_uint (value, prop->suspend);
       break;
+    case PROP_EXECUTION_PROVIDER:
+      g_value_set_string (value,
+          prop->fw_opened ? priv->info.execution_provider : NULL);
+      break;
+    case PROP_ACCELERATOR_MEMORY_MIB:
+      g_value_set_uint64 (value,
+          prop->fw_opened ? priv->info.accelerator_memory_mib : 0);
+      break;
     default:
       /* unknown property */
       return FALSE;
@@ -2519,6 +2539,9 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
     }
 
     if (priv->prop.fw_opened) {
+      /* a sub-plugin that does not report them leaves them empty */
+      priv->info.execution_provider = NULL;
+      priv->info.accelerator_memory_mib = 0;
       /* Update the framework info once it has been opened */
       if (GST_TF_FW_V1 (priv->fw) &&
           priv->fw->getFrameworkInfo (priv->fw, &priv->prop, priv->privateData,
@@ -2526,6 +2549,9 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
         priv->fw->close (&priv->prop, &priv->privateData);
         priv->prop.fw_opened = FALSE;
       }
+    }
+    if (priv->prop.fw_opened) {
+      gst_tensor_filter_common_notify_opened_model (priv);
     }
 
     end_time = g_get_monotonic_time ();
@@ -2536,6 +2562,22 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
           end_time - start_time);
     }
   }
+}
+
+/**
+ * @brief Notifies the properties of the opened model (execution-provider,
+ * accelerator-memory-mib) on the element, after the model was opened or closed.
+ * Never call it while the element is being finalized.
+ */
+void
+gst_tensor_filter_common_notify_opened_model (GstTensorFilterPrivate * priv)
+{
+  GObject *owner = (GObject *) priv->prop.context_owner;
+  if (!owner || !G_IS_OBJECT (owner)) {
+    return;
+  }
+  g_object_notify (owner, "execution-provider");
+  g_object_notify (owner, "accelerator-memory-mib");
 }
 
 /**
