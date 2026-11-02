@@ -1400,6 +1400,18 @@ structure_get_u64 (const GstStructure *structure, const char *field, uint64_t &v
   return true;
 }
 
+/** @brief The accelerator memory a session of plan holds, estimated: its weights plus an allowance; 0 on the CPU. */
+static uint64_t
+estimated_accelerator_memory_mib (const SessionPlan &plan)
+{
+  if (plan.ep == OrtEp::Cpu) {
+    return 0;
+  }
+  const uint64_t mib_bytes = 1024 * 1024;
+  return (model_file_bytes (plan.model_path) + mib_bytes - 1) / mib_bytes
+         + NNS_ONNXRUNTIME_SESSION_ALLOWANCE_MIB;
+}
+
 /** @brief The cache of the pipeline that prop's element belongs to, or nullptr. */
 static std::shared_ptr<SessionCache>
 pipeline_cache (const GstTensorFilterProperties *prop)
@@ -1602,6 +1614,10 @@ class onnxruntime_subplugin final : public tensor_filter_subplugin
   bool has_openvino;
   accl_hw has_accelerator;
 
+  /** @brief Of the opened model: the provider its session was created with, and the accelerator memory it holds (estimated). */
+  const char *execution_provider;
+  uint64_t accelerator_memory_mib;
+
   std::shared_ptr<SessionCache> cache; /**< the pipeline's cache, or a private one */
   bool shared; /**< cache is the pipeline's */
   EntryRef entry;
@@ -1658,6 +1674,7 @@ onnxruntime_subplugin::onnxruntime_subplugin ()
       has_cuda{ false }, has_qnn{ false },
       has_rocm{ false }, has_openvino{ false },
       has_accelerator{ ACCL_NONE },
+      execution_provider{ nullptr }, accelerator_memory_mib{ 0 },
       shared{ false },
       consumer_io_replica{ nullptr },
       contended{ false }
@@ -1713,6 +1730,8 @@ onnxruntime_subplugin::cleanup ()
 
   g_free (model_path);
   model_path = nullptr;
+  execution_provider = nullptr;
+  accelerator_memory_mib = 0;
   configured = false;
 }
 
@@ -1942,6 +1961,8 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
     throw;
   }
   configured = true;
+  execution_provider = ep_name (plan.ep);
+  accelerator_memory_mib = estimated_accelerator_memory_mib (plan);
 }
 
 /**
@@ -2137,6 +2158,11 @@ onnxruntime_subplugin::eventHandler (event_ops ops, GstTensorFilterFrameworkEven
   if (ops == SET_CONTEXT && !shared && data.context_type
       && g_str_equal (data.context_type, NNS_ONNXRUNTIME_SESSION_CACHE_CONTEXT_TYPE)) {
     /* opened before the pipeline's cache was known; reopen to join it */
+    return 0;
+  }
+  if (ops == GET_ACCELERATOR_MEMORY && configured) {
+    data.execution_provider = execution_provider;
+    data.accelerator_memory_mib = accelerator_memory_mib;
     return 0;
   }
   return -ENOENT;

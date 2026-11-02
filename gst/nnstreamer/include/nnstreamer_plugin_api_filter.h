@@ -188,6 +188,7 @@ typedef enum
   SET_ACCELERATOR,  /**< Update accelerator of the subplugin to be used as backend */
   CHECK_HW_AVAILABILITY, /**< Check the hw availability with custom option */
   SET_CONTEXT,      /**< A GstContext arrived after the subplugin was opened. Return 0 to have it closed and opened again (with the context available) before the element starts. */
+  GET_ACCELERATOR_MEMORY, /**< Asked once after each open: fill execution_provider and accelerator_memory_mib and return 0, or return -ENOENT to report nothing. Read as tensor_filter's "execution-provider" and "accelerator-memory-mib" properties. */
 } event_ops;
 
 /**
@@ -243,6 +244,12 @@ typedef struct _GstTensorFilterFrameworkEventData
     /** for SET_CONTEXT event */
     struct {
       const char *context_type; /**< type of the GstContext that arrived */
+    };
+
+    /** for GET_ACCELERATOR_MEMORY event */
+    struct {
+      const char *execution_provider; /**< the execution provider the opened model's session was created with, such as "cuda" or "cpu"; owned by the subplugin, valid while the model is open */
+      uint64_t accelerator_memory_mib; /**< the accelerator memory the opened model holds, in MiB, 0 on the CPU; may be an estimate */
     };
   };
 } GstTensorFilterFrameworkEventData;

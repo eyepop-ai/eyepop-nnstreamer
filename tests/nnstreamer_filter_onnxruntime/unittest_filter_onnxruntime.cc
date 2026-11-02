@@ -586,6 +586,94 @@ TEST (nnstreamerFilterOnnxRuntimeSessionCache, twoFiltersShareOneSession)
 }
 
 /**
+ * @brief Counts notifies of accelerator-memory-mib.
+ */
+static void
+_CountAcceleratorMemoryNotify (GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+  g_atomic_int_inc ((gint *) user_data);
+}
+
+/**
+ * @brief A filter with an open model reports the provider its session runs on and the
+ * accelerator memory it holds, on the CPU none; it notifies when it opens the model and
+ * again when it stops, and reports nothing while no model is open.
+ */
+TEST (nnstreamerFilterOnnxRuntime, reportsAcceleratorMemoryOfTheOpenModel)
+{
+  g_autofree gchar *model_file = NULL;
+  ASSERT_TRUE (_GetModelFilePath (&model_file));
+  /* the filter opens its model once it has a framework and a model, so the model is
+   * set only once the notify is connected */
+  GstElement *gstpipe = _NewOrangePipeline (
+      "tensor_filter name=f framework=onnxruntime ! tensor_sink name=sink0", NULL);
+  ASSERT_TRUE (gstpipe != nullptr);
+  GstElement *filter = gst_bin_get_by_name (GST_BIN (gstpipe), "f");
+  ASSERT_TRUE (filter != nullptr);
+  gint notifies = 0;
+  g_signal_connect (filter, "notify::accelerator-memory-mib",
+      G_CALLBACK (_CountAcceleratorMemoryNotify), &notifies);
+
+  gchar *provider = NULL;
+  guint64 mib = G_MAXUINT64;
+  g_object_get (filter, "execution-provider", &provider, "accelerator-memory-mib", &mib, NULL);
+  EXPECT_EQ (provider, nullptr);
+  EXPECT_EQ (mib, 0U);
+
+  g_object_set (filter, "model", model_file, NULL);
+  _PlayToEos (gstpipe);
+  EXPECT_GE (g_atomic_int_get (&notifies), 1);
+  g_object_get (filter, "execution-provider", &provider, "accelerator-memory-mib", &mib, NULL);
+  EXPECT_STREQ (provider, "cpu");
+  EXPECT_EQ (mib, 0U);
+  g_free (provider);
+  provider = NULL;
+
+  gint notifies_while_open = g_atomic_int_get (&notifies);
+  EXPECT_EQ (setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT), 0);
+  EXPECT_GT (g_atomic_int_get (&notifies), notifies_while_open);
+  g_object_get (filter, "execution-provider", &provider, "accelerator-memory-mib", &mib, NULL);
+  EXPECT_EQ (provider, nullptr);
+  EXPECT_EQ (mib, 0U);
+
+  gst_object_unref (filter);
+  gst_object_unref (gstpipe);
+}
+
+/**
+ * @brief A model the suspend watchdog unloads reports nothing, and says so with a notify.
+ */
+TEST (nnstreamerFilterOnnxRuntime, suspendedModelReportsNothing)
+{
+  g_autofree gchar *model_file = NULL;
+  ASSERT_TRUE (_GetModelFilePath (&model_file));
+  GstElement *gstpipe = _NewOrangePipeline (
+      "tensor_filter name=f framework=onnxruntime suspend=100 ! tensor_sink name=sink0", NULL);
+  ASSERT_TRUE (gstpipe != nullptr);
+  GstElement *filter = gst_bin_get_by_name (GST_BIN (gstpipe), "f");
+  ASSERT_TRUE (filter != nullptr);
+  gint notifies = 0;
+  g_signal_connect (filter, "notify::accelerator-memory-mib",
+      G_CALLBACK (_CountAcceleratorMemoryNotify), &notifies);
+  g_object_set (filter, "model", model_file, NULL);
+
+  _PlayToEos (gstpipe);
+  gint notifies_while_open = g_atomic_int_get (&notifies);
+  gchar *provider = NULL;
+  /* no more data arrives after EOS, so the watchdog unloads the model */
+  for (int i = 0; i < 100 && g_atomic_int_get (&notifies) == notifies_while_open; i++) {
+    g_usleep (20000);
+  }
+  EXPECT_GT (g_atomic_int_get (&notifies), notifies_while_open);
+  g_object_get (filter, "execution-provider", &provider, NULL);
+  EXPECT_EQ (provider, nullptr);
+
+  EXPECT_EQ (setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT), 0);
+  gst_object_unref (filter);
+  gst_object_unref (gstpipe);
+}
+
+/**
  * @brief A filter with a different I/O contract gets its own session.
  */
 TEST (nnstreamerFilterOnnxRuntimeSessionCache, differentIoContractGetsItsOwnSession)
