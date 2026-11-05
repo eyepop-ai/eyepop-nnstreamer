@@ -346,6 +346,54 @@ TEST (onnxruntimeSessionCache, exclusiveGrowthIsCapped)
   EXPECT_EQ (cache->stats ().grows, 0u);
 }
 
+/**
+ * @brief A key's own max_replicas (max_concurrent_runs:N) caps it below the cache's limit: a
+ * contender waits for the one replica instead of growing a second.
+ */
+TEST (onnxruntimeSessionCache, keyReplicaCapBoundsConcurrentRuns)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (asap (4), locks ());
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  spec.max_replicas = 1;
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+
+  Lease la = a.lease ();
+  auto contended = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  EXPECT_EQ (contended.wait_for (100ms), std::future_status::timeout);
+  la.release ();
+  EXPECT_EQ (contended.get (), 0);
+  EXPECT_EQ (factory.created, 1);
+  EXPECT_EQ (cache->stats ().grows, 0u);
+}
+
+/**
+ * @brief A key's max_replicas never raises the cache's max_replicas_per_key.
+ */
+TEST (onnxruntimeSessionCache, keyReplicaCapDoesNotRaiseTheCacheLimit)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (0, 0, 1), locks ());
+  auto spec = factory.spec ("a", Concurrency::Exclusive);
+  spec.max_replicas = 3;
+  EntryRef a = cache->acquire (spec);
+  EntryRef b = cache->acquire (spec);
+
+  Lease la = a.lease ();
+  auto contended = std::async (std::launch::async, [&b] () {
+    Lease lb = b.lease ();
+    return replica_id (lb);
+  });
+  EXPECT_EQ (contended.wait_for (100ms), std::future_status::timeout);
+  la.release ();
+  EXPECT_EQ (contended.get (), 0);
+  EXPECT_EQ (factory.created, 1);
+}
+
 TEST (onnxruntimeSessionCache, failedGrowStopsGrowingThatKey)
 {
   FakeFactory factory;

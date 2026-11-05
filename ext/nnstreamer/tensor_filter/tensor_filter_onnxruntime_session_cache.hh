@@ -80,6 +80,12 @@ class Replica
 struct ReplicaSpec {
   SessionKey key;
   Concurrency concurrency = Concurrency::Unbounded;
+  /**
+   * @brief The most replicas of this key, below the cache's max_replicas_per_key; 0 for that
+   * limit alone. With Concurrency::Exclusive it bounds the key's concurrent runs, and so the
+   * device memory their activations take: a consumer waits for a lease rather than adding one.
+   */
+  unsigned max_replicas = 0;
   int device = -1; /**< device whose memory is measured around creation; -1 = host */
   /**
    * @brief Runs per replica and thread that hold the device lock. CUDA graph capture

@@ -423,6 +423,8 @@ struct SessionPlan {
   OrtEp ep = OrtEp::Cpu;
   int device = 0;
   bool graph = false; /**< CUDA graph capture (TensorRT and CUDA) */
+  /** @brief The most concurrent runs of the shared session, from max_concurrent_runs:N; 0 = no limit */
+  unsigned max_concurrent_runs = 0;
   bool invoke_dynamic = false;
   bool shared = false; /**< the session is shared through a pipeline's cache */
   std::set<std::string> output_names; /**< outputs to bind; empty = all */
@@ -432,10 +434,14 @@ struct SessionPlan {
   {
     return ep == OrtEp::Tensorrt || ep == OrtEp::Cuda;
   }
-  /** @brief Only one Run() at a time: TensorRT and QNN lock internally, CUDA graphs forbid it. */
+  /**
+   * @brief Only one Run() per replica at a time: TensorRT and QNN lock internally, CUDA graphs
+   * forbid it, and a limit on concurrent runs counts replicas.
+   */
   Concurrency concurrency () const
   {
     return ep == OrtEp::Tensorrt || ep == OrtEp::Qnn || (ep == OrtEp::Cuda && graph)
+                   || max_concurrent_runs > 0
                ? Concurrency::Exclusive : Concurrency::Unbounded;
   }
   /** @brief A graph capture failure falls back to the same session without graph. */
@@ -1314,8 +1320,10 @@ make_spec (const SessionPlan &plan, const std::string &file_identity)
                          + "|device=" + std::to_string (plan.device)
                          + "|graph=" + (plan.graph ? "1" : "0")
                          + "|dynamic=" + (plan.invoke_dynamic ? "1" : "0")
+                         + "|runs=" + std::to_string (plan.max_concurrent_runs)
                          + "|" + plan.io_contract);
   spec.concurrency = plan.concurrency ();
+  spec.max_replicas = plan.max_concurrent_runs;
   spec.device = plan.use_cuda () ? plan.device : -1;
   if (plan.graph) {
     /* ORT captures on the first Run() of a thread (CUDA EP) or after one warm-up run (TensorRT) */
@@ -1817,6 +1825,7 @@ onnxruntime_subplugin::resolvePlan (const GstTensorFilterProperties *prop, bool 
   bool enable_tensorrt = false;
   bool disable_cuda = false;
   bool disable_cuda_graph = false;
+  unsigned max_concurrent_runs = 0;
 
   nns_logi("num_hw: %d acc string: %s", prop->num_hw, prop->accl_str);
   for (int j = 0; j < prop->num_hw; j++) {
@@ -1833,6 +1842,15 @@ onnxruntime_subplugin::resolvePlan (const GstTensorFilterProperties *prop, bool 
         enable_tensorrt = true;
       } else if (strcmp(custom_properties[i], "disable_cuda_graph") == 0) {
         disable_cuda_graph = true;
+      } else if (g_str_has_prefix(custom_properties[i], "max_concurrent_runs:")) {
+        guint64 runs = 0;
+        const gchar *value = custom_properties[i] + strlen("max_concurrent_runs:");
+        if (g_ascii_string_to_unsigned(value, 10, 1, G_MAXUINT, &runs, NULL)) {
+          max_concurrent_runs = (unsigned) runs;
+        } else {
+          g_warning("onnxruntime: ignoring %s, max_concurrent_runs takes a whole number from 1",
+                    custom_properties[i]);
+        }
       }
       /* disable_qnn, disable_rocm and disable_openvino are accepted but have never selected anything */
     }
@@ -1842,6 +1860,7 @@ onnxruntime_subplugin::resolvePlan (const GstTensorFilterProperties *prop, bool 
   SessionPlan plan;
   plan.model_path = model_path;
   plan.shared = shared;
+  plan.max_concurrent_runs = max_concurrent_runs;
   plan.invoke_dynamic = prop->invoke_dynamic ||
                         prop->input_meta.format != _NNS_TENSOR_FORMAT_STATIC ||
                         prop->output_meta.format != _NNS_TENSOR_FORMAT_STATIC;

@@ -555,7 +555,9 @@ SessionCache::grow_async (const std::shared_ptr<Entry> &entry)
 Lease
 SessionCache::lease (const std::shared_ptr<Entry> &entry, std::shared_ptr<Entry> &redirect)
 {
-  const unsigned max_replicas = std::max (1u, config_.max_replicas_per_key);
+  unsigned max_replicas = std::max (1u, config_.max_replicas_per_key);
+  if (entry->spec.max_replicas > 0)
+    max_replicas = std::min (max_replicas, entry->spec.max_replicas);
   const bool exclusive = entry->spec.concurrency == Concurrency::Exclusive;
   bool grow_requested = false;
   std::unique_lock<std::mutex> lock (entry->mu);
