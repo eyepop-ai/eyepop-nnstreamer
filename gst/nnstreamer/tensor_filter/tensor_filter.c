@@ -317,6 +317,7 @@ gst_tensor_filter_init (GstTensorFilter * self)
   gst_tensor_filter_common_init_property (priv);
   priv->prop.context_owner = self;
   priv->prop.get_context = gst_tensor_filter_get_context;
+  priv->prop.open_error = &priv->open_error;
   /* init qos properties */
   self->prev_ts = GST_CLOCK_TIME_NONE;
   self->throttling_delay = 0;
@@ -334,6 +335,8 @@ gst_tensor_filter_finalize (GObject * object)
 
   self = GST_TENSOR_FILTER (object);
   priv = &self->priv;
+  g_clear_pointer (&priv->open_error, g_free);
+  priv->prop.open_error = NULL;
 
   if (priv->prop.suspend != 0) {
     GST_OBJECT_LOCK (self);
@@ -1900,7 +1903,35 @@ gst_tensor_filter_start (GstBaseTransform * trans)
   /* If it is not configured properly, don't allow to start! */
   if (priv->fw == NULL)
     return FALSE;
+  g_clear_pointer (&priv->open_error, g_free);
   gst_tensor_filter_common_open_fw (priv);
+  if (!priv->prop.fw_opened) {
+    /* A failed start alone fails the state change silently: nothing on the bus says
+     * why, and an application that waits for an error never ends. The details carry
+     * the framework, the model and the reason; the code tells a model file that is
+     * missing (NOT_FOUND) from one the framework could not open (OPEN_READ). */
+    const gchar *framework = priv->prop.fwname ? priv->prop.fwname : "tensor_filter";
+    const gchar *model = (priv->prop.model_files && priv->prop.num_models > 0)
+        ? priv->prop.model_files[0] : NULL;
+    /* verify_model_path only applies once the framework info is known, after a first
+     * open, so a missing file usually reaches the framework: tell it apart here */
+    const gboolean not_found = priv->model_path_rejected
+        || (model && !g_file_test (model, G_FILE_TEST_EXISTS));
+    const gchar *reason = priv->open_error ? priv->open_error
+        : (not_found ? "no model file is set, or it is not a regular file" : "the framework gave no reason");
+    if (not_found) {
+      GST_ELEMENT_ERROR_WITH_DETAILS (self, RESOURCE, NOT_FOUND,
+          ("%s cannot find the model %s: %s", framework, model ? model : "(none)", reason),
+          (NULL), ("framework", G_TYPE_STRING, framework, "model", G_TYPE_STRING, model ? model : "",
+              "reason", G_TYPE_STRING, reason, NULL));
+    } else {
+      GST_ELEMENT_ERROR_WITH_DETAILS (self, RESOURCE, OPEN_READ,
+          ("%s cannot open the model %s: %s", framework, model ? model : "(none)", reason),
+          (NULL), ("framework", G_TYPE_STRING, framework, "model", G_TYPE_STRING, model ? model : "",
+              "reason", G_TYPE_STRING, reason, NULL));
+    }
+    return FALSE;
+  }
 
   if (priv->prop.suspend != 0) {
     GST_OBJECT_LOCK (self);

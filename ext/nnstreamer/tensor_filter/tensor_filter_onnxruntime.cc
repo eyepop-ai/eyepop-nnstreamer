@@ -1970,7 +1970,8 @@ onnxruntime_subplugin::configure_instance (const GstTensorFilterProperties *prop
     fallback.reset ();
     g_free (model_path);
     model_path = nullptr;
-    throw std::runtime_error ("ERROR running model inference: " + (std::string) exception.what ());
+    // the element names the model and that it could not open it
+    throw std::runtime_error (exception.what ());
   } catch (...) {
     entry.reset ();
     cache.reset ();

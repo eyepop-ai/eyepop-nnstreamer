@@ -141,6 +141,7 @@ typedef struct _GstTensorFilterProperties
 
   void *context_owner; /**< The element that owns these properties, NULL outside a pipeline (e.g. single API). Pass it to get_context. */
   void *(*get_context) (void *context_owner, const char *context_type); /**< Looks up a GstContext of context_type on context_owner or its nearest ancestor. Returns a new reference (unref with gst_context_unref) or NULL. NULL when there is no context_owner. */
+  char **open_error; /**< Where a sub-plugin whose open fails puts why, g_strdup'd, replacing what is there; the element posts it in its error and frees it. NULL outside a pipeline (e.g. single API). */
 } GstTensorFilterProperties;
 
 /**
