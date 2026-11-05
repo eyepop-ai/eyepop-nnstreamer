@@ -2527,13 +2527,16 @@ gst_tensor_filter_common_open_fw (GstTensorFilterPrivate * priv)
         run_without_model = priv->info.run_without_model;
       }
 
+      priv->model_path_rejected = FALSE;
       if (G_UNLIKELY (!run_without_model) &&
           G_UNLIKELY (!(priv->prop.model_files &&
                   priv->prop.num_models > 0 && priv->prop.model_files[0]))) {
+        priv->model_path_rejected = TRUE;
         return;
       }
       /* 0 if successfully loaded. 1 if skipped (already loaded). */
-      if (verify_model_path (priv)) {
+      priv->model_path_rejected = !verify_model_path (priv);
+      if (!priv->model_path_rejected) {
         if (priv->fw->open (&priv->prop, &priv->privateData) >= 0)
           priv->prop.fw_opened = TRUE;
       }

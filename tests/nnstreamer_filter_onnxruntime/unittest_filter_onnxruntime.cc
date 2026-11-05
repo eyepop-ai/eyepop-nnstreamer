@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <string>
 #include <vector>
 #include <glib.h>
 #include <gst/gst.h>
@@ -319,8 +320,53 @@ TEST (nnstreamerFilterOnnxRuntime, launch00_n)
 }
 
 /**
- * @brief A model that cannot be opened is an error on the bus naming the model and
- * onnxruntime's reason, not only a failed state change.
+ * @brief Plays a one-frame pipeline into a tensor_filter of model_file and returns the
+ * ERROR it posts, with its details, or NULL when it posts none.
+ */
+static GstMessage *
+_PlayIntoModel (const gchar *model_file)
+{
+  g_autofree gchar *pipeline = g_strdup_printf (
+      "videotestsrc num-buffers=1 ! videoconvert ! video/x-raw,format=RGB,width=224,height=224,framerate=0/1 ! tensor_converter ! tensor_filter framework=onnxruntime model=\"%s\" ! fakesink",
+      model_file);
+  GError *err = NULL;
+  GstElement *gstpipe = gst_parse_launch (pipeline, &err);
+  g_clear_error (&err);
+  if (!gstpipe)
+    return NULL;
+  EXPECT_NE (setPipelineStateSync (gstpipe, GST_STATE_PLAYING, UNITTEST_STATECHANGE_TIMEOUT), 0);
+  GstBus *bus = gst_element_get_bus (gstpipe);
+  GstMessage *message = gst_bus_timed_pop_filtered (bus, 0, GST_MESSAGE_ERROR);
+  gst_object_unref (bus);
+  setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT);
+  gst_object_unref (gstpipe);
+  return message;
+}
+
+/**
+ * @brief The details of an ERROR message: its framework, model and reason.
+ */
+static void
+_ErrorDetails (GstMessage *message, GError **error, std::string &framework,
+    std::string &model, std::string &reason)
+{
+  gst_message_parse_error (message, error, NULL);
+  const GstStructure *details = NULL;
+  gst_message_parse_error_details (message, &details);
+  ASSERT_NE (details, nullptr);
+  const gchar *value;
+  value = gst_structure_get_string (details, "framework");
+  framework = value ? value : "";
+  value = gst_structure_get_string (details, "model");
+  model = value ? value : "";
+  value = gst_structure_get_string (details, "reason");
+  reason = value ? value : "";
+}
+
+/**
+ * @brief A model the framework cannot open is an OPEN_READ error on the bus, not only
+ * a failed state change; its details name the framework, the model and the reason
+ * onnxruntime gave.
  */
 TEST (nnstreamerFilterOnnxRuntime, modelThatCannotOpenPostsAnError_n)
 {
@@ -329,32 +375,42 @@ TEST (nnstreamerFilterOnnxRuntime, modelThatCannotOpenPostsAnError_n)
   g_autofree gchar *model_file = g_build_filename (dir, "corrupt.onnx", NULL);
   ASSERT_TRUE (g_file_set_contents (model_file, "not an onnx model", -1, NULL));
 
-  g_autofree gchar *pipeline = g_strdup_printf (
-      "videotestsrc num-buffers=1 ! videoconvert ! video/x-raw,format=RGB,width=224,height=224,framerate=0/1 ! tensor_converter ! tensor_filter framework=onnxruntime model=\"%s\" ! fakesink",
-      model_file);
-  GError *err = NULL;
-  GstElement *gstpipe = gst_parse_launch (pipeline, &err);
-  g_clear_error (&err);
-  ASSERT_TRUE (gstpipe != nullptr);
-
-  EXPECT_NE (setPipelineStateSync (gstpipe, GST_STATE_PLAYING, UNITTEST_STATECHANGE_TIMEOUT), 0);
-  GstBus *bus = gst_element_get_bus (gstpipe);
-  GstMessage *message = gst_bus_timed_pop_filtered (bus, 0, GST_MESSAGE_ERROR);
+  GstMessage *message = _PlayIntoModel (model_file);
   ASSERT_NE (message, nullptr);
   GError *error = NULL;
-  gst_message_parse_error (message, &error, NULL);
+  std::string framework, model, reason;
+  _ErrorDetails (message, &error, framework, model, reason);
   EXPECT_TRUE (g_error_matches (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_OPEN_READ));
-  EXPECT_NE (strstr (error->message, "cannot open the model"), nullptr) << error->message;
-  EXPECT_NE (strstr (error->message, model_file), nullptr) << error->message;
-  /* onnxruntime's own reason, after the model's name */
-  EXPECT_GT (strlen (strstr (error->message, model_file)), strlen (model_file) + 2) << error->message;
-  g_error_free (error);
+  EXPECT_EQ (framework, "onnxruntime");
+  EXPECT_EQ (model, model_file);
+  EXPECT_FALSE (reason.empty ());
+  g_clear_error (&error);
   gst_message_unref (message);
-  gst_object_unref (bus);
 
-  setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT);
-  gst_object_unref (gstpipe);
   g_remove (model_file);
+  g_rmdir (dir);
+}
+
+/**
+ * @brief A model file that does not exist is a NOT_FOUND error, told apart from one
+ * the framework could not open.
+ */
+TEST (nnstreamerFilterOnnxRuntime, missingModelPostsNotFound_n)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("onnx-open-XXXXXX", NULL);
+  ASSERT_NE (dir, nullptr);
+  g_autofree gchar *model_file = g_build_filename (dir, "missing.onnx", NULL);
+
+  GstMessage *message = _PlayIntoModel (model_file);
+  ASSERT_NE (message, nullptr);
+  GError *error = NULL;
+  std::string framework, model, reason;
+  _ErrorDetails (message, &error, framework, model, reason);
+  EXPECT_TRUE (g_error_matches (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_NOT_FOUND)) << reason;
+  EXPECT_EQ (model, model_file);
+  g_clear_error (&error);
+  gst_message_unref (message);
+
   g_rmdir (dir);
 }
 
