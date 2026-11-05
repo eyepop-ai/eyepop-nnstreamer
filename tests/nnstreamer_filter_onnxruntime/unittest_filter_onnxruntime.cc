@@ -585,6 +585,46 @@ TEST (nnstreamerFilterOnnxRuntimeSessionCache, twoFiltersShareOneSession)
   nns_shared_slot_unref (slot);
 }
 
+#define LIMITED_FILTER "tensor_filter framework=onnxruntime custom=max_concurrent_runs:1 model=\"%s\" ! tensor_sink name=sink0"
+#define LIMITED_FILTER1 "tensor_filter framework=onnxruntime custom=max_concurrent_runs:1 model=\"%s\" ! tensor_sink name=sink1"
+
+/**
+ * @brief Filters with max_concurrent_runs:1 share one session that runs one at a time: both
+ * still classify, on one replica, though the cache would allow four.
+ */
+TEST (nnstreamerFilterOnnxRuntimeSessionCache, maxConcurrentRunsSharesOneReplica)
+{
+  NnsSharedSlot *slot = nns_shared_slot_new ();
+  NnsOnnxruntimeSessionCacheStats stats;
+  gint results = 0;
+
+  GstElement *gstpipe = _NewOrangePipeline (LIMITED_FILTER, LIMITED_FILTER1);
+  ASSERT_TRUE (gstpipe != nullptr);
+  GstContext *context = _NewSessionCacheContext (slot, "lru");
+  gst_structure_set (gst_context_writable_structure (context),
+      NNS_ONNXRUNTIME_SESSION_CACHE_FIELD_MAX_REPLICAS_PER_KEY, G_TYPE_UINT64, (guint64) 4, NULL);
+  gst_element_set_context (gstpipe, context);
+  gst_context_unref (context);
+
+  for (const gchar *name : { "sink0", "sink1" }) {
+    GstElement *sink = gst_bin_get_by_name (GST_BIN (gstpipe), name);
+    ASSERT_TRUE (sink != nullptr);
+    g_signal_connect (sink, "new-data", (GCallback) count_output, &results);
+    gst_object_unref (sink);
+  }
+
+  _PlayToEos (gstpipe);
+  EXPECT_EQ (results, 2);
+  ASSERT_TRUE (_GetSessionCacheStats (slot, &stats));
+  EXPECT_EQ (stats.sessions_created, 1U);
+  EXPECT_EQ (stats.consumers, 2U);
+  EXPECT_EQ (stats.replicas, 1U);
+
+  EXPECT_EQ (setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT), 0);
+  gst_object_unref (gstpipe);
+  nns_shared_slot_unref (slot);
+}
+
 /**
  * @brief Counts notifies of accelerator-memory-mib.
  */
