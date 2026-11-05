@@ -159,6 +159,7 @@ typedef struct _GstTensorFilterPrivate
   GstTensorFilterFrameworkInfo info; /**< NNFW framework info */
   GstTensorFilterStatistics stat; /**< NNFW plugin's statistics */
   const GstTensorFilterFramework *fw; /**< The implementation core of the NNFW. NULL if not configured */
+  gchar *open_error; /**< Why the last open of the model failed, as the sub-plugin put it in prop.open_error; NULL if it did not say */
 
   /* internal properties for tensor-filter */
   gboolean silent; /**< Verbose mode if FALSE. int instead of gboolean for non-glib custom plugins */

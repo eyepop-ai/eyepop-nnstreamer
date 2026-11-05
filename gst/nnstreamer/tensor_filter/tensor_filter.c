@@ -317,6 +317,7 @@ gst_tensor_filter_init (GstTensorFilter * self)
   gst_tensor_filter_common_init_property (priv);
   priv->prop.context_owner = self;
   priv->prop.get_context = gst_tensor_filter_get_context;
+  priv->prop.open_error = &priv->open_error;
   /* init qos properties */
   self->prev_ts = GST_CLOCK_TIME_NONE;
   self->throttling_delay = 0;
@@ -334,6 +335,8 @@ gst_tensor_filter_finalize (GObject * object)
 
   self = GST_TENSOR_FILTER (object);
   priv = &self->priv;
+  g_clear_pointer (&priv->open_error, g_free);
+  priv->prop.open_error = NULL;
 
   if (priv->prop.suspend != 0) {
     GST_OBJECT_LOCK (self);
@@ -1900,7 +1903,20 @@ gst_tensor_filter_start (GstBaseTransform * trans)
   /* If it is not configured properly, don't allow to start! */
   if (priv->fw == NULL)
     return FALSE;
+  g_clear_pointer (&priv->open_error, g_free);
   gst_tensor_filter_common_open_fw (priv);
+  if (!priv->prop.fw_opened) {
+    /* A failed start alone fails the state change silently: nothing on the bus says
+     * why, and an application that waits for an error never ends. */
+    const gchar *model = (priv->prop.model_files && priv->prop.num_models > 0)
+        ? priv->prop.model_files[0] : NULL;
+    GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ,
+        ("%s cannot open the model %s: %s", priv->prop.fwname ? priv->prop.fwname : "tensor_filter",
+            model ? model : "(none)",
+            priv->open_error ? priv->open_error : "the framework gave no reason"),
+        (NULL));
+    return FALSE;
+  }
 
   if (priv->prop.suspend != 0) {
     GST_OBJECT_LOCK (self);

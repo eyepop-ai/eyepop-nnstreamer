@@ -57,6 +57,17 @@ namespace nnstreamer
     return c;                      \
   } while (0);
 
+/** @brief Log why open failed, hand it to the element, and return c */
+#define _RETURN_OPEN_ERR(prop, c, m)          \
+  do {                                        \
+    nns_loge ("%s", m);                       \
+    if ((prop)->open_error) {                 \
+      g_free (*(prop)->open_error);           \
+      *(prop)->open_error = g_strdup (m);     \
+    }                                         \
+    return c;                                 \
+  } while (0);
+
 #define GET_TFSP_WITH_CHECKS(obj, private_data)                         \
   do {                                                                  \
     if (private_data == nullptr) {                                      \
@@ -91,13 +102,13 @@ tensor_filter_subplugin::cpp_open (const GstTensorFilterProperties *prop, void *
   try {
     obj.configure_instance (prop);
   } catch (const std::invalid_argument &e) {
-    _RETURN_ERR_WITH_MSG (-EINVAL, e.what ());
+    _RETURN_OPEN_ERR (prop, -EINVAL, e.what ());
   } catch (const std::system_error &e) {
-    _RETURN_ERR_WITH_MSG (e.code ().value () * -1, e.what ());
+    _RETURN_OPEN_ERR (prop, e.code ().value () * -1, e.what ());
   } catch (const std::runtime_error &e) {
-    _RETURN_ERR_WITH_MSG (-EINVAL, e.what ());
+    _RETURN_OPEN_ERR (prop, -EINVAL, e.what ());
   } catch (const std::exception &e) {
-    _RETURN_ERR_WITH_MSG (-EINVAL, e.what ());
+    _RETURN_OPEN_ERR (prop, -EINVAL, e.what ());
   }
 
   /** 3. Mark that this is not a representative (found by

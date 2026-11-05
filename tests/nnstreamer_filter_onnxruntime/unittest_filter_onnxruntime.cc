@@ -13,6 +13,7 @@
 #include <vector>
 #include <glib.h>
 #include <gst/gst.h>
+#include <glib/gstdio.h>
 
 #include <nnstreamer_plugin_api_filter.h>
 #include <nnstreamer_util.h>
@@ -315,6 +316,46 @@ TEST (nnstreamerFilterOnnxRuntime, launch00_n)
   EXPECT_NE (setPipelineStateSync (gstpipe, GST_STATE_PLAYING, UNITTEST_STATECHANGE_TIMEOUT), 0);
 
   gst_object_unref (gstpipe);
+}
+
+/**
+ * @brief A model that cannot be opened is an error on the bus naming the model and
+ * onnxruntime's reason, not only a failed state change.
+ */
+TEST (nnstreamerFilterOnnxRuntime, modelThatCannotOpenPostsAnError_n)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("onnx-open-XXXXXX", NULL);
+  ASSERT_NE (dir, nullptr);
+  g_autofree gchar *model_file = g_build_filename (dir, "corrupt.onnx", NULL);
+  ASSERT_TRUE (g_file_set_contents (model_file, "not an onnx model", -1, NULL));
+
+  g_autofree gchar *pipeline = g_strdup_printf (
+      "videotestsrc num-buffers=1 ! videoconvert ! video/x-raw,format=RGB,width=224,height=224,framerate=0/1 ! tensor_converter ! tensor_filter framework=onnxruntime model=\"%s\" ! fakesink",
+      model_file);
+  GError *err = NULL;
+  GstElement *gstpipe = gst_parse_launch (pipeline, &err);
+  g_clear_error (&err);
+  ASSERT_TRUE (gstpipe != nullptr);
+
+  EXPECT_NE (setPipelineStateSync (gstpipe, GST_STATE_PLAYING, UNITTEST_STATECHANGE_TIMEOUT), 0);
+  GstBus *bus = gst_element_get_bus (gstpipe);
+  GstMessage *message = gst_bus_timed_pop_filtered (bus, 0, GST_MESSAGE_ERROR);
+  ASSERT_NE (message, nullptr);
+  GError *error = NULL;
+  gst_message_parse_error (message, &error, NULL);
+  EXPECT_TRUE (g_error_matches (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_OPEN_READ));
+  EXPECT_NE (strstr (error->message, "cannot open the model"), nullptr) << error->message;
+  EXPECT_NE (strstr (error->message, model_file), nullptr) << error->message;
+  /* onnxruntime's own reason, after the model's name */
+  EXPECT_GT (strlen (strstr (error->message, model_file)), strlen (model_file) + 2) << error->message;
+  g_error_free (error);
+  gst_message_unref (message);
+  gst_object_unref (bus);
+
+  setPipelineStateSync (gstpipe, GST_STATE_NULL, UNITTEST_STATECHANGE_TIMEOUT);
+  gst_object_unref (gstpipe);
+  g_remove (model_file);
+  g_rmdir (dir);
 }
 
 /**
