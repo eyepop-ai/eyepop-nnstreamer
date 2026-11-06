@@ -540,6 +540,12 @@ OrtReplica::createTensorRtOptions (
   OrtTensorRTProviderOptionsV2* options = nullptr;
   Ort::ThrowOnError (api.CreateTensorRTProviderOptions (&options));
   const gchar *trt_fp16_enable = "1";
+  /* An fp16 engine computes a layer norm written out as Pow -> ReduceMean (opset < 17
+   * exports such as CLIP's and SigLIP 2's) in fp16 and overflows: their embeddings came
+   * out at a cosine of 0.65 to 0.87 to the CPU's. This keeps those two layers in fp32,
+   * at no measurable cost. TensorRT reads it only when it builds an engine; an engine
+   * already built, cached or exported is loaded as it was built. */
+  const gchar *trt_layer_norm_fp32_fallback = "1";
   const gchar *trt_int8_enable = "0";
   const gchar *trt_engine_cache_enable = "1";
   const gchar *trt_dump_ep_context_model = "0";
@@ -549,6 +555,8 @@ OrtReplica::createTensorRtOptions (
   for (auto iter = provider_options.begin(); iter != provider_options.end(); iter++) {
     if (iter->first.compare("trt_fp16_enable") == 0) {
       trt_fp16_enable = iter->second.c_str ();
+    } else if (iter->first.compare("trt_layer_norm_fp32_fallback") == 0) {
+      trt_layer_norm_fp32_fallback = iter->second.c_str ();
     } else if (iter->first.compare("trt_int8_enable") == 0) {
       trt_int8_enable = iter->second.c_str ();
     } else if (iter->first.compare("trt_dump_ep_context_model") == 0) {
@@ -567,6 +575,7 @@ OrtReplica::createTensorRtOptions (
     "trt_onnx_model_folder_path",
     "trt_cuda_graph_enable",
     "trt_fp16_enable",
+    "trt_layer_norm_fp32_fallback",
     "trt_int8_enable",
     "trt_engine_cache_enable",
     "trt_engine_cache_path",
@@ -579,6 +588,7 @@ OrtReplica::createTensorRtOptions (
     modelDir,
     plan.graph ? "1" : "0",
     trt_fp16_enable,
+    trt_layer_norm_fp32_fallback,
     trt_int8_enable,
     trt_engine_cache_enable,
     trt_engine_cache_path,
