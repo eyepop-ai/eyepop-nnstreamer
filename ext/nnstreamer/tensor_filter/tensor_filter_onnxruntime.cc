@@ -20,6 +20,8 @@
  * any other instance gets a private cache holding just its own session.
  */
 
+#include <cstddef>
+#include <cstring>
 #include <set>
 #include <string>
 #include <chrono>
@@ -60,6 +62,8 @@ void init_filter_onnxruntime (void) __attribute__ ((constructor));
 void fini_filter_onnxruntime (void) __attribute__ ((destructor));
 G_MODULE_EXPORT gboolean nnstreamer_onnxruntime_session_cache_get_stats (
     NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats);
+G_MODULE_EXPORT gboolean nnstreamer_onnxruntime_session_cache_get_stats_sized (
+    NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats, gsize size);
 }
 
 // #define DEBUG_TIMING 1
@@ -102,6 +106,14 @@ typedef enum
 #define cudaStreamNonBlocking_ 0x01
 
 typedef struct CUstream_st_ * cudaStream_t_;
+typedef struct CUgraph_st_ * cudaGraph_t_;
+
+typedef enum
+{
+  cudaStreamCaptureStatusNone_ = 0,
+  cudaStreamCaptureStatusActive_ = 1,
+  cudaStreamCaptureStatusInvalidated_ = 2
+} cudaStreamCaptureStatus_;
 
 typedef int (*cudaMalloc_t)(void **p, size_t s);
 typedef int (*cudaFree_t)(void *devPtr);
@@ -119,6 +131,10 @@ typedef int (*cudaMemGetInfo_t) ( size_t *free, size_t *total );
 typedef int (*cudaSetDevice_t) ( int device );
 typedef int (*cudaGetDevice_t) ( int *device );
 typedef int (*cudaGetDeviceCount_t) ( int *count );
+typedef int (*cudaStreamIsCapturing_t) ( cudaStream_t_ stream, cudaStreamCaptureStatus_ *status );
+typedef int (*cudaStreamEndCapture_t) ( cudaStream_t_ stream, cudaGraph_t_ *graph );
+typedef int (*cudaGraphDestroy_t) ( cudaGraph_t_ graph );
+typedef int (*cudaGetLastError_t) ( void );
 static cudaMalloc_t cudaMalloc_ = nullptr;
 static cudaFree_t cudaFree_ = nullptr;
 static cudaMemcpyAsync_t cudaMemcpyAsync_ = nullptr;
@@ -130,6 +146,10 @@ static cudaMemGetInfo_t cudaMemGetInfo_ = nullptr;
 static cudaSetDevice_t cudaSetDevice_ = nullptr;
 static cudaGetDevice_t cudaGetDevice_ = nullptr;
 static cudaGetDeviceCount_t cudaGetDeviceCount_ = nullptr;
+static cudaStreamIsCapturing_t cudaStreamIsCapturing_ = nullptr;
+static cudaStreamEndCapture_t cudaStreamEndCapture_ = nullptr;
+static cudaGraphDestroy_t cudaGraphDestroy_ = nullptr;
+static cudaGetLastError_t cudaGetLastError_ = nullptr;
 
 static gboolean cudaMemcpy_initialized = FALSE;
 
@@ -209,10 +229,93 @@ static void init_cudaMemcpy() {
               reinterpret_cast<gpointer *> (&cudaGetDeviceCount_))) {
         g_warning("g_module_symbol( ... \"cudaGetDeviceCount\" ...) NOT FOUND");
       }
+      /* recovering a stream after a failed CUDA graph capture (AWSU-331) */
+      const struct {
+        const gchar *name;
+        gpointer *symbol;
+      } recovery[] = {
+        { "cudaStreamIsCapturing", reinterpret_cast<gpointer *> (&cudaStreamIsCapturing_) },
+        { "cudaStreamEndCapture", reinterpret_cast<gpointer *> (&cudaStreamEndCapture_) },
+        { "cudaGraphDestroy", reinterpret_cast<gpointer *> (&cudaGraphDestroy_) },
+        { "cudaGetLastError", reinterpret_cast<gpointer *> (&cudaGetLastError_) },
+      };
+      for (const auto &entry : recovery) {
+        if (!g_module_symbol(cuda_module, entry.name, entry.symbol)) {
+          g_warning("g_module_symbol( ... \"%s\" ...) NOT FOUND", entry.name);
+        }
+      }
     }
   }
   cudaMemcpy_initialized = TRUE;
 }
+
+/**
+ * @brief Brings a CUDA stream back after a run that failed on it, before anything else runs
+ * on it or destroys what used it. A CUDA graph capture that the engine broke (it synchronized
+ * the stream mid-run, AWSU-331) leaves the stream capturing and its error pending; tearing a
+ * session down on such a stream fails to free the engine's memory. Ends the capture, drops the
+ * partial graph, clears the thread's pending error and waits for the stream. A capture must be
+ * ended on the thread that began it, so call this on the thread whose run failed; a teardown
+ * on another thread calls it again in case. Whether the stream works again.
+ */
+static bool
+recover_cuda_stream (cudaStream_t_ stream, const std::string &model_path)
+{
+  if (!stream) {
+    return true;
+  }
+  if (cudaStreamIsCapturing_ && cudaStreamEndCapture_) {
+    cudaStreamCaptureStatus_ status = cudaStreamCaptureStatusNone_;
+    if (cudaStreamIsCapturing_ (stream, &status) == 0 && status != cudaStreamCaptureStatusNone_) {
+      cudaGraph_t_ graph = nullptr;
+      int error = cudaStreamEndCapture_ (stream, &graph);
+      if (graph && cudaGraphDestroy_) {
+        cudaGraphDestroy_ (graph);
+      }
+      g_warning ("onnxruntime: ended the %s CUDA graph capture of %s (cudaStreamEndCapture: %d)",
+          status == cudaStreamCaptureStatusInvalidated_ ? "broken" : "unfinished",
+          model_path.c_str (), error);
+    }
+  }
+  if (cudaGetLastError_) {
+    int error = cudaGetLastError_ ();
+    if (error != 0) {
+      g_info ("onnxruntime: cleared CUDA error %d left by a failed run of %s", error, model_path.c_str ());
+    }
+  }
+  if (cudaStreamSynchronize_ && cudaStreamSynchronize_ (stream) != 0) {
+    int error = cudaGetLastError_ ? cudaGetLastError_ () : -1;
+    g_warning ("onnxruntime: the CUDA stream of %s does not recover (error %d)", model_path.c_str (), error);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Thread-local CUDA graph capture mode for a scope: allowed while another thread captures.
+ * Restores the thread's mode however the scope ends, a failed run included. Inactive without CUDA.
+ */
+class ThreadLocalCaptureMode
+{
+  public:
+  explicit ThreadLocalCaptureMode (bool active = true)
+      : active_ (active && cudaThreadExchangeStreamCaptureMode_ != nullptr)
+  {
+    if (active_)
+      cudaThreadExchangeStreamCaptureMode_ (&mode);
+  }
+  ~ThreadLocalCaptureMode ()
+  {
+    if (active_)
+      cudaThreadExchangeStreamCaptureMode_ (&mode);
+  }
+  ThreadLocalCaptureMode (const ThreadLocalCaptureMode &) = delete;
+  ThreadLocalCaptureMode &operator= (const ThreadLocalCaptureMode &) = delete;
+
+  private:
+  const bool active_;
+  cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
+};
 
 struct CudaMemoryDeleter {
   explicit CudaMemoryDeleter(const Ort::Allocator* alloc) noexcept {
@@ -514,6 +617,8 @@ class OrtReplica : public Replica
   public:
   explicit OrtReplica (const SessionPlan &plan);
   ~OrtReplica () override;
+  /** @brief Recovers the stream, then releases the session and the stream; false on a CUDA error. */
+  bool teardown () override;
 
   const std::string model_path;
   const bool use_cuda;
@@ -527,6 +632,8 @@ class OrtReplica : public Replica
   std::unique_ptr<IoState> io; /**< set for exclusive replicas, which every consumer runs through */
 
   private:
+  bool torn_down = false;
+  bool torn_down_cleanly = true;
   Ort::SessionOptions createSessionOptions (const SessionPlan &plan);
   OrtTensorRTProviderOptionsV2 *createTensorRtOptions (
       const OrtApi &api, const SessionPlan &plan, const gchar *modelDir, gboolean isModelDirWriteable);
@@ -855,13 +962,54 @@ OrtReplica::OrtReplica (const SessionPlan &plan)
 
 OrtReplica::~OrtReplica ()
 {
+  teardown ();
+}
+
+bool
+OrtReplica::teardown ()
+{
+  if (torn_down) {
+    return torn_down_cleanly;
+  }
+  torn_down = true;
+  /* the cache tears down on whichever thread evicts, not on the one that ran the session */
+  CudaDeviceScope deviceScope (device);
+  /* CUDA work for the device must not run off it; nothing can tell whether the release freed */
+  const bool cuda = use_cuda && deviceScope.bound ();
+  bool clean = !use_cuda || cuda;
+  if (use_cuda && !cuda) {
+    g_warning ("onnxruntime: cannot bind CUDA device %d to tear down the session of %s; "
+               "its device memory may not be freed", device, model_path.c_str ());
+  }
+  if (cuda) {
+    /* a session released on a stream still capturing, or still in error, fails to free its
+     * engine and its arena: Myelin, cuDNN and cuBLAS report CUDA error 900 (AWSU-331) */
+    clean = recover_cuda_stream (cudaStream, model_path);
+  }
   io.reset ();
   runOptions = Ort::RunOptions{ nullptr };
   memInfo = Ort::MemoryInfo{ nullptr };
   session = Ort::Session{ nullptr };
-  if (cudaStream && cudaStreamDestroy_) {
-    cudaStreamDestroy_(cudaStream);
+  if (cuda && cudaGetLastError_) {
+    /* the release logs its CUDA failures and returns nothing; the runtime still holds them */
+    int error = cudaGetLastError_ ();
+    if (error != 0) {
+      g_warning ("onnxruntime: releasing the session of %s left CUDA error %d; its device memory "
+                 "may not be freed", model_path.c_str (), error);
+      clean = false;
+    }
   }
+  if (cuda && cudaStream && cudaStreamDestroy_) {
+    if (cudaStreamDestroy_ (cudaStream) != 0) {
+      clean = false;
+      if (cudaGetLastError_) {
+        cudaGetLastError_ ();
+      }
+    }
+    cudaStream = nullptr;
+  }
+  torn_down_cleanly = clean;
+  return clean;
 }
 
 IoState::IoState (OrtReplica &replica_, bool own_stream)
@@ -1215,15 +1363,12 @@ IoState::invoke (GstTensorFilterProperties *prop,
   std::chrono::nanoseconds sync_time(std::chrono::nanoseconds::zero());
 #endif
 
-  cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
   /* a pinned run thread or another consumer's thread may run this */
   CudaDeviceScope deviceScope (replica.device);
   deviceScope.require (replica.device);
+  ThreadLocalCaptureMode captureMode (replica.use_cuda);
 
   TIME_IT([&]{
-    if (replica.use_cuda) {
-      cudaThreadExchangeStreamCaptureMode_(&mode);
-    }
     TIME_IT([&] {
       prepareInput(input, prop, alloc_time, copy_time);
       if (replica.use_cuda) {
@@ -1237,7 +1382,16 @@ IoState::invoke (GstTensorFilterProperties *prop,
       prepareOutput(output, prop, alloc_time, copy_time); return nullptr;
     }, prepare_output_time);
     TIME_IT([&] {
-      replica.session.Run(replica.runOptions, ioBinding); return nullptr;
+      try {
+        replica.session.Run(replica.runOptions, ioBinding);
+      } catch (...) {
+        /* on this thread, which began any capture the run broke (AWSU-331) */
+        if (replica.use_cuda) {
+          recover_cuda_stream (cudaStream, replica.model_path);
+        }
+        throw;
+      }
+      return nullptr;
     }, run_time);
     TIME_IT([&] {
       postProcessInput(prop, alloc_time, copy_time); return nullptr;
@@ -1248,7 +1402,6 @@ IoState::invoke (GstTensorFilterProperties *prop,
     if (replica.use_cuda) {
       TIME_IT([&] {
         cudaStreamSynchronize_(cudaStream);
-        cudaThreadExchangeStreamCaptureMode_(&mode);
         return nullptr;
       }, sync_time);
     }
@@ -1322,6 +1475,26 @@ model_file_identity (const std::string &model_path)
          + "|mtime=" + std::to_string (st.st_mtim.tv_sec) + "." + std::to_string (st.st_mtim.tv_nsec);
 }
 
+/**
+ * @brief Whether a session's creation or first run failed for want of device memory: the
+ * messages of onnxruntime's arena, the CUDA and TensorRT providers and the CUDA runtime.
+ */
+static bool
+is_out_of_memory (const std::exception &e)
+{
+  static const char *const kMarkers[] = {
+    "out of memory", "outofmemory", "failed to allocate", "cudaerrormemoryallocation",
+    "cuda failure 2:", "cuda error 2 ",
+  };
+  g_autofree gchar *message = g_ascii_strdown (e.what (), -1);
+  for (const char *marker : kMarkers) {
+    if (strstr (message, marker)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static ReplicaSpec
 make_spec (const SessionPlan &plan, const std::string &file_identity)
 {
@@ -1350,6 +1523,7 @@ make_spec (const SessionPlan &plan, const std::string &file_identity)
   }
   spec.create = [plan] () -> std::unique_ptr<Replica> { return std::make_unique<OrtReplica> (plan); };
   spec.host_bytes = [path = plan.model_path] () { return model_file_bytes (path); };
+  spec.is_out_of_memory = is_out_of_memory;
   return spec;
 }
 
@@ -1474,16 +1648,16 @@ pipeline_cache (const GstTensorFilterProperties *prop)
   return cache;
 }
 
-gboolean
-nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats)
+/** @brief The stats of the cache in slot, in full; FALSE while the slot is empty. */
+static gboolean
+session_cache_stats (NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats)
 {
-  g_return_val_if_fail (slot != nullptr, FALSE);
-  g_return_val_if_fail (stats != nullptr, FALSE);
   auto *holder = static_cast<SlotCache *> (nns_shared_slot_peek (slot));
   if (!holder) {
     return FALSE;
   }
   CacheStats s = holder->cache->stats ();
+  *stats = NnsOnnxruntimeSessionCacheStats{};
   stats->entries = s.entries;
   stats->replicas = s.replicas;
   stats->bytes = s.bytes;
@@ -1498,25 +1672,41 @@ nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxrunt
   stats->grow_failures = s.grow_failures;
   stats->poisons = s.poisons;
   stats->grows_in_flight = s.grows_in_flight;
+  stats->destroy_failures = s.destroy_failures;
+  stats->leaked_bytes = s.leaked_bytes;
+  stats->oom_evictions = s.oom_evictions;
   return TRUE;
 }
 
-/** @brief Thread-local CUDA graph capture mode for a scope: allowed while another thread captures. */
-class ThreadLocalCaptureMode
+/** @brief The original export: writes only the fields up to grows_in_flight, which every
+ * caller's struct has, whatever header it was built against. */
+gboolean
+nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats)
 {
-  public:
-  ThreadLocalCaptureMode ()
-  {
-    cudaThreadExchangeStreamCaptureMode_ (&mode);
+  g_return_val_if_fail (slot != nullptr, FALSE);
+  g_return_val_if_fail (stats != nullptr, FALSE);
+  NnsOnnxruntimeSessionCacheStats full;
+  if (!session_cache_stats (slot, &full)) {
+    return FALSE;
   }
-  ~ThreadLocalCaptureMode ()
-  {
-    cudaThreadExchangeStreamCaptureMode_ (&mode);
-  }
+  memcpy (stats, &full, offsetof (NnsOnnxruntimeSessionCacheStats, destroy_failures));
+  return TRUE;
+}
 
-  private:
-  cudaStreamCaptureMode_ mode = cudaStreamCaptureModeThreadLocal_;
-};
+gboolean
+nnstreamer_onnxruntime_session_cache_get_stats_sized (
+    NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats, gsize size)
+{
+  g_return_val_if_fail (slot != nullptr, FALSE);
+  g_return_val_if_fail (stats != nullptr, FALSE);
+  NnsOnnxruntimeSessionCacheStats full;
+  if (!session_cache_stats (slot, &full)) {
+    return FALSE;
+  }
+  memcpy (stats, &full, MIN (size, sizeof (full)));
+  return TRUE;
+}
+
 
 /**
  * @brief A consumer's own device copies of its static inputs and outputs. An exclusive

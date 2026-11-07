@@ -42,6 +42,13 @@ G_BEGIN_DECLS
 /** @brief The memory a session holds beyond its weights (activations, workspace), as estimated. */
 #define NNS_ONNXRUNTIME_SESSION_ALLOWANCE_MIB 256
 
+/**
+ * @brief Defined when NnsOnnxruntimeSessionCacheStats has destroy_failures, leaked_bytes and
+ * oom_evictions (AWSU-331) and the sub-plugin exports NNS_ONNXRUNTIME_SESSION_CACHE_GET_STATS_SIZED_SYMBOL,
+ * so a reader can build against a header with or without them.
+ */
+#define NNS_ONNXRUNTIME_SESSION_CACHE_STATS_HAS_LEAKS 1
+
 /** @brief Counters of one cache; the gauges (entries .. consumers) are current values. */
 typedef struct
 {
@@ -59,6 +66,11 @@ typedef struct
   uint64_t grow_failures;
   uint64_t poisons;
   uint64_t grows_in_flight;
+  /* appended (AWSU-331): only the sized export writes them; the original export stops at
+   * grows_in_flight, so a caller built against an older header is never overrun */
+  uint64_t destroy_failures; /**< sessions whose teardown reported a CUDA error; not in sessions_destroyed */
+  uint64_t leaked_bytes; /**< their measured bytes, counted against max-bytes for good */
+  uint64_t oom_evictions; /**< idle sessions evicted because a new one ran out of device memory */
 } NnsOnnxruntimeSessionCacheStats;
 
 /**
@@ -70,6 +82,16 @@ typedef struct
 
 typedef gboolean (*NnsOnnxruntimeSessionCacheGetStatsFunc) (
     NnsSharedSlot * slot, NnsOnnxruntimeSessionCacheStats * stats);
+
+/**
+ * @brief Name of the export that writes the stats up to size bytes of stats, the size of the
+ * caller's NnsOnnxruntimeSessionCacheStats, so a struct that grows again overruns no caller.
+ * It has the type NnsOnnxruntimeSessionCacheGetStatsSizedFunc.
+ */
+#define NNS_ONNXRUNTIME_SESSION_CACHE_GET_STATS_SIZED_SYMBOL "nnstreamer_onnxruntime_session_cache_get_stats_sized"
+
+typedef gboolean (*NnsOnnxruntimeSessionCacheGetStatsSizedFunc) (
+    NnsSharedSlot * slot, NnsOnnxruntimeSessionCacheStats * stats, gsize size);
 
 G_END_DECLS
 

@@ -74,6 +74,15 @@ class Replica
 {
   public:
   virtual ~Replica () = default;
+  /**
+   * @brief Releases what the replica holds, before the cache destroys it, under its device's
+   * lock. False when the release reported an error, so device memory may stay allocated: the
+   * cache then counts the replica's measured bytes as leaked, against max_bytes.
+   */
+  virtual bool teardown ()
+  {
+    return true;
+  }
 };
 
 /** @brief How to build the replicas of one key. */
@@ -104,6 +113,13 @@ struct ReplicaSpec {
   std::string run_thread_name; /**< a pinned replica's thread name; the first 15 characters */
   std::function<std::unique_ptr<Replica> ()> create; /**< may throw */
   std::function<uint64_t ()> host_bytes; /**< size estimate when no device probe applies; optional */
+  /**
+   * @brief Whether an exception from create, or from a replica's first run, means the device
+   * ran out of memory. Then the cache evicts the idle replicas on the device (not those of
+   * unbounded entries in use) and tries once more; for a build a consumer waits on, not for
+   * an asynchronous grow. Optional.
+   */
+  std::function<bool (const std::exception &)> is_out_of_memory;
 };
 
 /** @brief Bytes in use on a device, or nullopt if unknown. */
@@ -142,6 +158,9 @@ struct CacheStats {
   uint64_t grow_failures = 0;
   uint64_t poisons = 0;
   uint64_t grows_in_flight = 0; /**< async grow threads still running */
+  uint64_t destroy_failures = 0; /**< replicas whose teardown reported an error; not in sessions_destroyed */
+  uint64_t leaked_bytes = 0; /**< their measured bytes, counted against max_bytes for good */
+  uint64_t oom_evictions = 0; /**< idle replicas evicted because a build or first run ran out of memory */
 };
 
 class SessionCache;
@@ -263,6 +282,12 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
   std::shared_ptr<Entry> follow (const std::shared_ptr<Entry> &from);
   std::shared_ptr<Entry> poison (const std::shared_ptr<Entry> &entry, const ReplicaSpec &fallback);
   void evict ();
+  /**
+   * @brief Evicts the idle replicas on device, except those of unbounded entries in use, whose
+   * consumers stay bound to them; how many. For a build that ran out of memory.
+   */
+  size_t evict_idle_on (int device);
+  bool out_of_memory (const ReplicaSpec &spec, const std::exception &e) const;
   uint64_t tick ()
   {
     return ++clock_;
@@ -288,6 +313,9 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
   std::atomic<uint64_t> grow_failures_{ 0 };
   std::atomic<uint64_t> poisons_{ 0 };
   std::atomic<uint64_t> grows_in_flight_{ 0 };
+  std::atomic<uint64_t> destroy_failures_{ 0 };
+  std::atomic<uint64_t> leaked_bytes_{ 0 };
+  std::atomic<uint64_t> oom_evictions_{ 0 };
 };
 
 } /* namespace tensor_filter_onnxruntime */
