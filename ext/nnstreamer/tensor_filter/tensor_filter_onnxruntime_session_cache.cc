@@ -967,6 +967,11 @@ SessionCache::evict_idle_on (int device)
       if (entry.spec.device != device)
         continue;
       std::lock_guard<std::mutex> lock (entry.mu);
+      /* a consumer of an unbounded replica keeps its own binding on the replica's session
+       * between leases: destroying the replica would leave it bound to a freed session.
+       * Exclusive replicas keep their binding inside the replica, so any idle one may go. */
+      if (entry.spec.concurrency == Concurrency::Unbounded && entry.consumers > 0)
+        continue;
       entry.take_idle (victims);
     }
   }

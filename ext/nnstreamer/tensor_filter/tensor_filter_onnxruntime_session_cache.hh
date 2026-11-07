@@ -115,8 +115,9 @@ struct ReplicaSpec {
   std::function<uint64_t ()> host_bytes; /**< size estimate when no device probe applies; optional */
   /**
    * @brief Whether an exception from create, or from a replica's first run, means the device
-   * ran out of memory. Then the cache evicts every idle replica on the device and tries once
-   * more; for a build a consumer waits on, not for an asynchronous grow. Optional.
+   * ran out of memory. Then the cache evicts the idle replicas on the device (not those of
+   * unbounded entries in use) and tries once more; for a build a consumer waits on, not for
+   * an asynchronous grow. Optional.
    */
   std::function<bool (const std::exception &)> is_out_of_memory;
 };
@@ -281,7 +282,10 @@ class SessionCache : public std::enable_shared_from_this<SessionCache>
   std::shared_ptr<Entry> follow (const std::shared_ptr<Entry> &from);
   std::shared_ptr<Entry> poison (const std::shared_ptr<Entry> &entry, const ReplicaSpec &fallback);
   void evict ();
-  /** @brief Evicts every idle replica on device; how many. For a build that ran out of memory. */
+  /**
+   * @brief Evicts the idle replicas on device, except those of unbounded entries in use, whose
+   * consumers stay bound to them; how many. For a build that ran out of memory.
+   */
   size_t evict_idle_on (int device);
   bool out_of_memory (const ReplicaSpec &spec, const std::exception &e) const;
   uint64_t tick ()

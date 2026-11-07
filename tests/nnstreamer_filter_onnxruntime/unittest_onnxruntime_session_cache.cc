@@ -1045,3 +1045,21 @@ TEST (onnxruntimeSessionCache, aLaterRunOutOfMemoryIsNotRetried)
   EXPECT_THROW (second.run ([] () { throw std::runtime_error (kOutOfMemory); }), std::runtime_error);
   EXPECT_EQ (cache->stats ().oom_evictions, 0u);
 }
+
+TEST (onnxruntimeSessionCache, outOfMemoryKeepsAnUnboundedReplicaInUse)
+{
+  /* its consumers stay bound to its session between leases */
+  FakeFactory factory;
+  factory.capacity = 250;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  EntryRef shared = cache->acquire (factory.spec ("shared", Concurrency::Unbounded, 0));
+  EntryRef exclusive = cache->acquire (factory.spec ("exclusive", Concurrency::Exclusive, 0));
+
+  EntryRef c = cache->acquire (factory.spec ("c", Concurrency::Unbounded, 0));
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.oom_evictions, 1u);
+  EXPECT_EQ (stats.replicas, 2u);
+  Lease lease = shared.lease ();
+  EXPECT_EQ (replica_id (lease), 0);
+}

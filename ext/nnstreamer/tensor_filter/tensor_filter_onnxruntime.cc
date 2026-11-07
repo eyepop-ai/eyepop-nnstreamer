@@ -20,6 +20,8 @@
  * any other instance gets a private cache holding just its own session.
  */
 
+#include <cstddef>
+#include <cstring>
 #include <set>
 #include <string>
 #include <chrono>
@@ -60,6 +62,8 @@ void init_filter_onnxruntime (void) __attribute__ ((constructor));
 void fini_filter_onnxruntime (void) __attribute__ ((destructor));
 G_MODULE_EXPORT gboolean nnstreamer_onnxruntime_session_cache_get_stats (
     NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats);
+G_MODULE_EXPORT gboolean nnstreamer_onnxruntime_session_cache_get_stats_sized (
+    NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats, gsize size);
 }
 
 // #define DEBUG_TIMING 1
@@ -970,8 +974,14 @@ OrtReplica::teardown ()
   torn_down = true;
   /* the cache tears down on whichever thread evicts, not on the one that ran the session */
   CudaDeviceScope deviceScope (device);
-  bool clean = true;
-  if (use_cuda) {
+  /* CUDA work for the device must not run off it; nothing can tell whether the release freed */
+  const bool cuda = use_cuda && deviceScope.bound ();
+  bool clean = !use_cuda || cuda;
+  if (use_cuda && !cuda) {
+    g_warning ("onnxruntime: cannot bind CUDA device %d to tear down the session of %s; "
+               "its device memory may not be freed", device, model_path.c_str ());
+  }
+  if (cuda) {
     /* a session released on a stream still capturing, or still in error, fails to free its
      * engine and its arena: Myelin, cuDNN and cuBLAS report CUDA error 900 (AWSU-331) */
     clean = recover_cuda_stream (cudaStream, model_path);
@@ -980,7 +990,7 @@ OrtReplica::teardown ()
   runOptions = Ort::RunOptions{ nullptr };
   memInfo = Ort::MemoryInfo{ nullptr };
   session = Ort::Session{ nullptr };
-  if (use_cuda && cudaGetLastError_) {
+  if (cuda && cudaGetLastError_) {
     /* the release logs its CUDA failures and returns nothing; the runtime still holds them */
     int error = cudaGetLastError_ ();
     if (error != 0) {
@@ -989,7 +999,7 @@ OrtReplica::teardown ()
       clean = false;
     }
   }
-  if (cudaStream && cudaStreamDestroy_) {
+  if (cuda && cudaStream && cudaStreamDestroy_) {
     if (cudaStreamDestroy_ (cudaStream) != 0) {
       clean = false;
       if (cudaGetLastError_) {
@@ -1638,16 +1648,16 @@ pipeline_cache (const GstTensorFilterProperties *prop)
   return cache;
 }
 
-gboolean
-nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats)
+/** @brief The stats of the cache in slot, in full; FALSE while the slot is empty. */
+static gboolean
+session_cache_stats (NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats)
 {
-  g_return_val_if_fail (slot != nullptr, FALSE);
-  g_return_val_if_fail (stats != nullptr, FALSE);
   auto *holder = static_cast<SlotCache *> (nns_shared_slot_peek (slot));
   if (!holder) {
     return FALSE;
   }
   CacheStats s = holder->cache->stats ();
+  *stats = NnsOnnxruntimeSessionCacheStats{};
   stats->entries = s.entries;
   stats->replicas = s.replicas;
   stats->bytes = s.bytes;
@@ -1665,6 +1675,35 @@ nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxrunt
   stats->destroy_failures = s.destroy_failures;
   stats->leaked_bytes = s.leaked_bytes;
   stats->oom_evictions = s.oom_evictions;
+  return TRUE;
+}
+
+/** @brief The original export: writes only the fields up to grows_in_flight, which every
+ * caller's struct has, whatever header it was built against. */
+gboolean
+nnstreamer_onnxruntime_session_cache_get_stats (NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats)
+{
+  g_return_val_if_fail (slot != nullptr, FALSE);
+  g_return_val_if_fail (stats != nullptr, FALSE);
+  NnsOnnxruntimeSessionCacheStats full;
+  if (!session_cache_stats (slot, &full)) {
+    return FALSE;
+  }
+  memcpy (stats, &full, offsetof (NnsOnnxruntimeSessionCacheStats, destroy_failures));
+  return TRUE;
+}
+
+gboolean
+nnstreamer_onnxruntime_session_cache_get_stats_sized (
+    NnsSharedSlot *slot, NnsOnnxruntimeSessionCacheStats *stats, gsize size)
+{
+  g_return_val_if_fail (slot != nullptr, FALSE);
+  g_return_val_if_fail (stats != nullptr, FALSE);
+  NnsOnnxruntimeSessionCacheStats full;
+  if (!session_cache_stats (slot, &full)) {
+    return FALSE;
+  }
+  memcpy (stats, &full, MIN (size, sizeof (full)));
   return TRUE;
 }
 
