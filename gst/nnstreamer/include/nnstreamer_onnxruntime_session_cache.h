@@ -42,6 +42,12 @@ G_BEGIN_DECLS
 /** @brief The memory a session holds beyond its weights (activations, workspace), as estimated. */
 #define NNS_ONNXRUNTIME_SESSION_ALLOWANCE_MIB 256
 
+/**
+ * @brief Defined when NnsOnnxruntimeSessionCacheStats has destroy_failures, leaked_bytes and
+ * oom_evictions (AWSU-331), so a reader can build against a header with or without them.
+ */
+#define NNS_ONNXRUNTIME_SESSION_CACHE_STATS_HAS_LEAKS 1
+
 /** @brief Counters of one cache; the gauges (entries .. consumers) are current values. */
 typedef struct
 {
