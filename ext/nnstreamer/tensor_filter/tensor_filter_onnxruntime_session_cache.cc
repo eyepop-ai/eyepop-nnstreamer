@@ -171,14 +171,41 @@ measure_growth (const DeviceMemoryProbe &probe, int device, const std::function<
   return known;
 }
 
-/** @brief Destroys slots; device replicas under their device lock. */
+/** @brief Tears down a slot: its run thread first, then its replica. Whether it freed cleanly. */
+static bool
+teardown_slot (ReplicaSlot &slot)
+{
+  slot.runner.reset ();
+  return !slot.replica || slot.replica->teardown ();
+}
+
+/**
+ * @brief Destroys slots, device replicas under their device lock, and counts each: destroyed, or,
+ * when its teardown reported an error, a destroy failure whose bytes stay counted as leaked.
+ */
 void
 SessionCache::destroy_slots (std::vector<std::unique_ptr<ReplicaSlot>> &slots)
 {
   for (auto &slot : slots) {
-    if (slot && slot->device >= 0) {
+    if (!slot)
+      continue;
+    const uint64_t bytes = slot->bytes;
+    bool freed;
+    if (slot->device >= 0) {
       std::lock_guard<std::mutex> lock (device_locks_->of (slot->device));
+      freed = teardown_slot (*slot);
       slot.reset ();
+    } else {
+      freed = teardown_slot (*slot);
+      slot.reset ();
+    }
+    if (freed) {
+      sessions_destroyed_++;
+    } else {
+      destroy_failures_++;
+      leaked_bytes_ += bytes;
+      g_warning ("onnxruntime session cache: a session's teardown failed; %" G_GUINT64_FORMAT
+                 " bytes stay counted as leaked", (guint64) bytes);
     }
   }
   slots.clear ();
@@ -460,7 +487,17 @@ SessionCache::ensure_replica (const std::shared_ptr<Entry> &entry)
 
   std::unique_ptr<ReplicaSlot> slot;
   try {
-    slot = build (entry->spec);
+    try {
+      slot = build (entry->spec);
+    } catch (const std::exception &e) {
+      /* a consumer waits for this build: make room on the device once, then try again */
+      if (!out_of_memory (entry->spec, e) || evict_idle_on (entry->spec.device) == 0)
+        throw;
+      g_warning ("onnxruntime session cache: creating %s ran out of device memory (%s); "
+                 "evicted the idle sessions on device %d, trying once more",
+          entry->spec.key.canonical.c_str (), e.what (), entry->spec.device);
+      slot = build (entry->spec);
+    }
   } catch (...) {
     lock.lock ();
     entry->building--;
@@ -527,7 +564,6 @@ SessionCache::grow_async (const std::shared_ptr<Entry> &entry)
       std::vector<std::unique_ptr<ReplicaSlot>> slots;
       slots.push_back (std::move (discard));
       self->destroy_slots (slots);
-      self->sessions_destroyed_++;
     }
     self->evict ();
     self->grows_in_flight_--;
@@ -683,7 +719,6 @@ SessionCache::return_lease (Lease &lease)
     std::vector<std::unique_ptr<ReplicaSlot>> slots;
     slots.push_back (std::move (discard));
     destroy_slots (slots);
-    sessions_destroyed_++;
   }
 }
 
@@ -701,11 +736,24 @@ SessionCache::run_measured (Lease &lease, const std::function<void ()> &fn)
   lease.serialize_ = false;
 
   uint64_t grown = 0;
-  {
+  auto run_once = [&] () {
     /* the caller holds the device lock while a pinned replica runs on its own thread */
     std::lock_guard<std::mutex> lock (device_locks_->of (spec.device));
     measure_growth (measure ? probe_ : DeviceMemoryProbe (), spec.device,
         [&slot, &fn] () { slot.run (fn); }, grown);
+  };
+  try {
+    run_once ();
+  } catch (const std::exception &e) {
+    /* a first run allocates its activations, and TensorRT its execution context: make room
+     * once, then run again; this replica is leased, so it is not among the evicted */
+    if (!measure || !out_of_memory (spec, e) || evict_idle_on (spec.device) == 0)
+      throw;
+    g_warning ("onnxruntime session cache: the first run of %s ran out of device memory (%s); "
+               "evicted the idle sessions on device %d, running once more",
+        spec.key.canonical.c_str (), e.what (), spec.device);
+    grown = 0;
+    run_once ();
   }
   if (grown == 0)
     return;
@@ -794,7 +842,6 @@ SessionCache::poison (const std::shared_ptr<Entry> &entry, const ReplicaSpec &fa
     }
     add_consumer (to);
   }
-  sessions_destroyed_ += discard.size ();
   destroy_slots (discard);
   evict ();
   return to;
@@ -818,7 +865,8 @@ SessionCache::evict ()
     }
     evicted = victims.size ();
 
-    uint64_t count = 0, bytes = 0;
+    /* a replica whose teardown failed may still hold its device memory */
+    uint64_t count = 0, bytes = leaked_bytes_;
     for (auto &kv : entries_) {
       Entry &entry = *kv.second;
       std::lock_guard<std::mutex> lock (entry.mu);
@@ -899,8 +947,34 @@ SessionCache::evict ()
         (guint64) config_.max_sessions, (guint64) config_.max_bytes);
   }
   evictions_ += evicted;
-  sessions_destroyed_ += victims.size ();
   destroy_slots (victims);
+}
+
+bool
+SessionCache::out_of_memory (const ReplicaSpec &spec, const std::exception &e) const
+{
+  return spec.device >= 0 && spec.is_out_of_memory && spec.is_out_of_memory (e);
+}
+
+size_t
+SessionCache::evict_idle_on (int device)
+{
+  std::vector<std::unique_ptr<ReplicaSlot>> victims;
+  {
+    std::lock_guard<std::mutex> cache_lock (cache_mu_);
+    for (auto &kv : entries_) {
+      Entry &entry = *kv.second;
+      if (entry.spec.device != device)
+        continue;
+      std::lock_guard<std::mutex> lock (entry.mu);
+      entry.take_idle (victims);
+    }
+  }
+  const size_t evicted = victims.size ();
+  evictions_ += evicted;
+  oom_evictions_ += evicted;
+  destroy_slots (victims);
+  return evicted;
 }
 
 CacheStats
@@ -929,6 +1003,9 @@ SessionCache::stats () const
   stats.grow_failures = grow_failures_;
   stats.poisons = poisons_;
   stats.grows_in_flight = grows_in_flight_;
+  stats.destroy_failures = destroy_failures_;
+  stats.leaked_bytes = leaked_bytes_;
+  stats.oom_evictions = oom_evictions_;
   return stats;
 }
 

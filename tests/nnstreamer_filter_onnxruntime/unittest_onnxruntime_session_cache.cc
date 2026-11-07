@@ -35,10 +35,30 @@ class FakeReplica : public Replica
     if (in_use > 0)
       (*destroyed_in_use)++;
   }
+  bool teardown () override
+  {
+    if (fails_teardown)
+      return false;
+    if (device_used)
+      *device_used -= bytes;
+    return true;
+  }
   const int id;
   std::atomic<int> in_use{ 0 };
   std::atomic<int> *destroyed_in_use;
+  /** frees bytes of device_used at teardown, as a session frees its device memory */
+  std::atomic<uint64_t> *device_used = nullptr;
+  uint64_t bytes = 0;
+  bool fails_teardown = false; /**< as a session torn down on a broken CUDA stream */
 };
+
+const char *const kOutOfMemory = "fake device out of memory";
+
+bool
+is_fake_out_of_memory (const std::exception &e)
+{
+  return std::string (e.what ()) == kOutOfMemory;
+}
 
 /** @brief Builds fake replicas; each one takes bytes_per_replica of fake device memory. */
 struct FakeFactory {
@@ -48,6 +68,9 @@ struct FakeFactory {
   std::atomic<int> destroyed_in_use{ 0 }; /**< replicas destroyed while a lease used them */
   uint64_t bytes_per_replica = 100;
   std::chrono::milliseconds delay{ 0 };
+  /** device memory: 0 for no limit; past it creation throws kOutOfMemory, and teardown frees */
+  uint64_t capacity = 0;
+  std::set<int> failing_teardowns; /**< replica ids whose teardown fails */
 
   ReplicaSpec spec (const std::string &key, Concurrency concurrency = Concurrency::Unbounded, int device = -1)
   {
@@ -61,10 +84,19 @@ struct FakeFactory {
       int index = created++;
       if (fail_from >= 0 && index >= fail_from)
         throw std::runtime_error ("fake creation failure");
+      if (capacity && device_used + bytes_per_replica > capacity)
+        throw std::runtime_error (kOutOfMemory);
       device_used += bytes_per_replica;
-      return std::make_unique<FakeReplica> (index, &destroyed_in_use);
+      auto replica = std::make_unique<FakeReplica> (index, &destroyed_in_use);
+      if (capacity) {
+        replica->device_used = &device_used;
+        replica->bytes = bytes_per_replica;
+      }
+      replica->fails_teardown = failing_teardowns.count (index) > 0;
+      return replica;
     };
     spec.host_bytes = [this] () { return bytes_per_replica; };
+    spec.is_out_of_memory = is_fake_out_of_memory;
     return spec;
   }
 
@@ -897,4 +929,119 @@ main (int argc, char **argv)
 {
   testing::InitGoogleTest (&argc, argv);
   return RUN_ALL_TESTS ();
+}
+
+TEST (onnxruntimeSessionCache, aFailedTeardownCountsAsLeakedNotDestroyed)
+{
+  FakeFactory factory;
+  factory.failing_teardowns = { 0 };
+  auto cache = SessionCache::create (CacheConfig{}, locks (), factory.probe ());
+
+  cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.replicas, 0u);
+  EXPECT_EQ (stats.sessions_destroyed, 0u);
+  EXPECT_EQ (stats.destroy_failures, 1u);
+  EXPECT_EQ (stats.leaked_bytes, 100u);
+}
+
+TEST (onnxruntimeSessionCache, leakedBytesCountAgainstMaxBytes)
+{
+  FakeFactory factory;
+  factory.failing_teardowns = { 0 };
+  auto cache = SessionCache::create (lru (0, 250), locks (), factory.probe ());
+
+  cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
+  cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
+  /* over 250: a, the oldest, is evicted and its teardown fails; then its 100 leaked bytes
+   * and b and c are still over 250, so b goes too, where without the leak both would stay */
+  cache->acquire (factory.spec ("c", Concurrency::Unbounded, 0)).reset ();
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.leaked_bytes, 100u);
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (stats.bytes, 100u);
+  EXPECT_EQ (stats.sessions_destroyed, 1u);
+  EXPECT_EQ (stats.destroy_failures, 1u);
+}
+
+TEST (onnxruntimeSessionCache, aBuildOutOfMemoryEvictsTheIdleAndTriesOnceMore)
+{
+  FakeFactory factory;
+  factory.capacity = 250;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
+  cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
+
+  EntryRef c = cache->acquire (factory.spec ("c", Concurrency::Unbounded, 0));
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.oom_evictions, 2u);
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (factory.device_used, 100u);
+}
+
+TEST (onnxruntimeSessionCache, aBuildOutOfMemoryWithNothingIdleFails)
+{
+  FakeFactory factory;
+  factory.capacity = 150;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  EntryRef a = cache->acquire (factory.spec ("a", Concurrency::Exclusive, 0));
+  Lease held = a.lease ();
+
+  EXPECT_THROW (cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)), std::runtime_error);
+  EXPECT_EQ (cache->stats ().oom_evictions, 0u);
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+}
+
+TEST (onnxruntimeSessionCache, anOtherBuildFailureEvictsNothing)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  cache->acquire (factory.spec ("a", Concurrency::Unbounded, 0)).reset ();
+  factory.fail_from = 1;
+
+  EXPECT_THROW (cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)), std::runtime_error);
+  EXPECT_EQ (cache->stats ().oom_evictions, 0u);
+  EXPECT_EQ (cache->stats ().replicas, 1u);
+}
+
+TEST (onnxruntimeSessionCache, aFirstRunOutOfMemoryEvictsTheIdleAndRunsOnceMore)
+{
+  FakeFactory factory;
+  factory.capacity = 250;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  EntryRef a = cache->acquire (factory.spec ("a", Concurrency::Exclusive, 0));
+  cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
+
+  int runs = 0;
+  Lease first = a.lease ();
+  first.run ([&] () {
+    runs++;
+    /* the first run's activations: 80 more */
+    if (factory.device_used + 80 > factory.capacity)
+      throw std::runtime_error (kOutOfMemory);
+    factory.device_used += 80;
+  });
+  first.release ();
+
+  EXPECT_EQ (runs, 2);
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.oom_evictions, 1u);
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (stats.bytes, 180u);
+}
+
+TEST (onnxruntimeSessionCache, aLaterRunOutOfMemoryIsNotRetried)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  EntryRef a = cache->acquire (factory.spec ("a", Concurrency::Exclusive, 0));
+  cache->acquire (factory.spec ("b", Concurrency::Unbounded, 0)).reset ();
+  a.lease ().run ([] () {});
+
+  Lease second = a.lease ();
+  EXPECT_THROW (second.run ([] () { throw std::runtime_error (kOutOfMemory); }), std::runtime_error);
+  EXPECT_EQ (cache->stats ().oom_evictions, 0u);
 }

@@ -59,6 +59,10 @@ typedef struct
   uint64_t grow_failures;
   uint64_t poisons;
   uint64_t grows_in_flight;
+  /* appended: a reader compiled against this header gets them (AWSU-331) */
+  uint64_t destroy_failures; /**< sessions whose teardown reported a CUDA error; not in sessions_destroyed */
+  uint64_t leaked_bytes; /**< their measured bytes, counted against max-bytes for good */
+  uint64_t oom_evictions; /**< idle sessions evicted because a new one ran out of device memory */
 } NnsOnnxruntimeSessionCacheStats;
 
 /**
