@@ -53,6 +53,9 @@ class FakeReplica : public Replica
 };
 
 const char *const kOutOfMemory = "fake device out of memory";
+/** what onnxruntime 1.27 throws when TensorRT cannot allocate the device memory of a cached engine */
+const char *const kTrtDeserialize = "[ONNXRuntimeError] : 1 : FAIL : TensorRT EP could not "
+                                    "deserialize engine from cache: /models/person.engine";
 
 bool
 is_fake_out_of_memory (const std::exception &e)
@@ -71,6 +74,8 @@ struct FakeFactory {
   /** device memory: 0 for no limit; past it creation throws kOutOfMemory, and teardown frees */
   uint64_t capacity = 0;
   std::set<int> failing_teardowns; /**< replica ids whose teardown fails */
+  const char *oom_message = kOutOfMemory; /**< what creation throws past capacity */
+  bool corrupt = false; /**< every creation throws oom_message, as a corrupt engine fails */
 
   ReplicaSpec spec (const std::string &key, Concurrency concurrency = Concurrency::Unbounded, int device = -1)
   {
@@ -84,8 +89,8 @@ struct FakeFactory {
       int index = created++;
       if (fail_from >= 0 && index >= fail_from)
         throw std::runtime_error ("fake creation failure");
-      if (capacity && device_used + bytes_per_replica > capacity)
-        throw std::runtime_error (kOutOfMemory);
+      if (corrupt || (capacity && device_used + bytes_per_replica > capacity))
+        throw std::runtime_error (oom_message);
       device_used += bytes_per_replica;
       auto replica = std::make_unique<FakeReplica> (index, &destroyed_in_use);
       if (capacity) {
@@ -1062,4 +1067,79 @@ TEST (onnxruntimeSessionCache, outOfMemoryKeepsAnUnboundedReplicaInUse)
   EXPECT_EQ (stats.replicas, 2u);
   Lease lease = shared.lease ();
   EXPECT_EQ (replica_id (lease), 0);
+}
+
+TEST (onnxruntimeSessionCache, outOfMemoryMessagesAreClassified)
+{
+  /* onnxruntime's arena, the CUDA provider and the CUDA runtime */
+  EXPECT_TRUE (is_device_out_of_memory ("CUDA failure 2: out of memory ; GPU=0"));
+  EXPECT_TRUE (is_device_out_of_memory ("Failed to allocate memory for requested buffer of size 8"));
+  EXPECT_TRUE (is_device_out_of_memory ("CUDA error cudaErrorMemoryAllocation:out of memory"));
+  /* the TensorRT provider, when TensorRT returns no engine or no execution context */
+  EXPECT_TRUE (is_device_out_of_memory (kTrtDeserialize));
+  EXPECT_TRUE (is_device_out_of_memory (
+      "TensorRT EP could not deserialize engine from encrypted cache: /models/person.engine"));
+  EXPECT_TRUE (is_device_out_of_memory ("TensorRT EP could not deserialize engine from binary data"));
+  EXPECT_TRUE (is_device_out_of_memory ("TensorRT EP failed to deserialize engine for fused node: n"));
+  EXPECT_TRUE (is_device_out_of_memory ("TensorRT EP failed to deserialize engine."));
+  EXPECT_TRUE (is_device_out_of_memory ("TensorRT EP Failed to Build Engine."));
+  EXPECT_TRUE (is_device_out_of_memory (
+      "[ONNXRuntimeError] : 1 : FAIL : TensorRT EP could not build execution context for fused node: n"));
+  EXPECT_TRUE (is_device_out_of_memory ("TensorRT EP failed to create context."));
+  /* an engine build that fails is not memory, nor is anything else */
+  EXPECT_FALSE (is_device_out_of_memory ("TensorRT EP failed to create engine from network for fused node: n"));
+  EXPECT_FALSE (is_device_out_of_memory ("TensorRT EP failed to create engine from network."));
+  EXPECT_FALSE (is_device_out_of_memory ("TensorRT EP could not create timing cache: /cache"));
+  EXPECT_FALSE (is_device_out_of_memory ("Load model from /models/person.onnx failed: No such file"));
+  EXPECT_FALSE (is_device_out_of_memory (""));
+  EXPECT_FALSE (is_device_out_of_memory (nullptr));
+}
+
+TEST (onnxruntimeSessionCache, aTensorrtEngineThatCannotDeserializeEvictsTheIdleAndTriesOnceMore)
+{
+  FakeFactory factory;
+  factory.capacity = 250;
+  factory.oom_message = kTrtDeserialize;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  auto spec = [&factory] (const std::string &key) {
+    ReplicaSpec spec = factory.spec (key, Concurrency::Unbounded, 0);
+    spec.is_out_of_memory = [] (const std::exception &e) { return is_device_out_of_memory (e.what ()); };
+    return spec;
+  };
+  cache->acquire (spec ("a")).reset ();
+  cache->acquire (spec ("b")).reset ();
+
+  EntryRef c = cache->acquire (spec ("c"));
+
+  CacheStats stats = cache->stats ();
+  EXPECT_EQ (stats.oom_evictions, 2u);
+  EXPECT_EQ (stats.replicas, 1u);
+  EXPECT_EQ (factory.created, 4);
+  EXPECT_EQ (factory.device_used, 100u);
+}
+
+TEST (onnxruntimeSessionCache, aCorruptTensorrtEngineIsTriedOnceMoreOnlyOnce)
+{
+  FakeFactory factory;
+  auto cache = SessionCache::create (lru (), locks (), factory.probe ());
+  auto spec = [&factory] (const std::string &key) {
+    ReplicaSpec spec = factory.spec (key, Concurrency::Unbounded, 0);
+    spec.is_out_of_memory = [] (const std::exception &e) { return is_device_out_of_memory (e.what ()); };
+    return spec;
+  };
+  cache->acquire (spec ("a")).reset ();
+  cache->acquire (spec ("b")).reset ();
+  factory.oom_message = kTrtDeserialize;
+  factory.corrupt = true;
+
+  /* it fails, evicts the idle a and b, fails again, and the second failure is thrown */
+  EXPECT_THROW (cache->acquire (spec ("c")), std::runtime_error);
+  EXPECT_EQ (factory.created, 4);
+  EXPECT_EQ (cache->stats ().oom_evictions, 2u);
+  EXPECT_EQ (cache->stats ().replicas, 0u);
+
+  /* with nothing idle left to evict, the next attempt fails at once */
+  EXPECT_THROW (cache->acquire (spec ("c")), std::runtime_error);
+  EXPECT_EQ (factory.created, 5);
+  EXPECT_EQ (cache->stats ().oom_evictions, 2u);
 }

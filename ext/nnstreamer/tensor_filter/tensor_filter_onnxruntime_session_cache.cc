@@ -11,6 +11,7 @@
 #include "tensor_filter_onnxruntime_session_cache.hh"
 
 #include <algorithm>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <unordered_set>
@@ -980,6 +981,37 @@ SessionCache::evict_idle_on (int device)
   oom_evictions_ += evicted;
   destroy_slots (victims);
   return evicted;
+}
+
+bool
+is_device_out_of_memory (const char *message)
+{
+  static const char *const kMarkers[] = {
+    /* onnxruntime's arena, the CUDA provider and the CUDA runtime */
+    "out of memory",
+    "outofmemory",
+    "failed to allocate",
+    "cudaerrormemoryallocation",
+    "cuda failure 2:",
+    "cuda error 2 ",
+    /* the TensorRT provider (onnxruntime 1.27), when deserializeCudaEngine returns no engine:
+     * from the engine cache, an encrypted cache or an EPContext node; after a build; and on
+     * a run of a dynamic-shape engine, which deserializes it from the cache */
+    "tensorrt ep could not deserialize engine",
+    "tensorrt ep failed to deserialize engine",
+    "tensorrt ep failed to build engine.",
+    /* ... and when createExecutionContext returns no context */
+    "tensorrt ep could not build execution context",
+    "tensorrt ep failed to create context",
+  };
+  if (!message)
+    return false;
+  g_autofree gchar *lower = g_ascii_strdown (message, -1);
+  for (const char *marker : kMarkers) {
+    if (strstr (lower, marker))
+      return true;
+  }
+  return false;
 }
 
 CacheStats

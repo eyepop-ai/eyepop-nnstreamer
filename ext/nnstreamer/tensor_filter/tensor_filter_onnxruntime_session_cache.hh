@@ -122,6 +122,21 @@ struct ReplicaSpec {
   std::function<bool (const std::exception &)> is_out_of_memory;
 };
 
+/**
+ * @brief Whether a message from onnxruntime says a session's creation or first run failed
+ * for want of device memory: the messages of onnxruntime's arena, the CUDA and TensorRT
+ * providers and the CUDA runtime. TensorRT returns no engine, or no execution context, when
+ * it cannot allocate device memory, and the TensorRT provider reports only that it could
+ * not deserialize the engine or create the context: those count as out of memory too. A
+ * corrupt cached engine fails the same way, so the cache's single retry costs it one
+ * eviction of the device's idle replicas and one more deserialization, never a loop. A
+ * failed engine build (buildSerializedNetwork) is not counted: TensorRT skips the tactics
+ * it cannot allocate memory for, so a failed build is seldom memory, and building again
+ * would take minutes. An engine just built that does not deserialize is counted: it is not
+ * corrupt, so memory is the likely cause.
+ */
+bool is_device_out_of_memory (const char *message);
+
 /** @brief Bytes in use on a device, or nullopt if unknown. */
 using DeviceMemoryProbe = std::function<std::optional<uint64_t> (int device)>;
 

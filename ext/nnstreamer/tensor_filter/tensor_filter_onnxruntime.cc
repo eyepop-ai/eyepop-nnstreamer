@@ -1475,24 +1475,11 @@ model_file_identity (const std::string &model_path)
          + "|mtime=" + std::to_string (st.st_mtim.tv_sec) + "." + std::to_string (st.st_mtim.tv_nsec);
 }
 
-/**
- * @brief Whether a session's creation or first run failed for want of device memory: the
- * messages of onnxruntime's arena, the CUDA and TensorRT providers and the CUDA runtime.
- */
+/** @brief Whether a session's creation or first run failed for want of device memory. */
 static bool
 is_out_of_memory (const std::exception &e)
 {
-  static const char *const kMarkers[] = {
-    "out of memory", "outofmemory", "failed to allocate", "cudaerrormemoryallocation",
-    "cuda failure 2:", "cuda error 2 ",
-  };
-  g_autofree gchar *message = g_ascii_strdown (e.what (), -1);
-  for (const char *marker : kMarkers) {
-    if (strstr (message, marker)) {
-      return true;
-    }
-  }
-  return false;
+  return is_device_out_of_memory (e.what ());
 }
 
 static ReplicaSpec
